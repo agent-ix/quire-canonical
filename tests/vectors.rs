@@ -5,9 +5,11 @@
 //! names a preimage, its expected canonical text, and the SHA-256 of that
 //! text.
 //!
-//! The expectations were not produced by this crate. The canonical text comes
-//! from the RFC 8785 examples and from an ECMAScript `JSON.stringify`
-//! reference run; the digests from an independent SHA-256.
+//! Every input is original to this crate; the `sec-*` vectors exercise the
+//! properties RFC 8785 sections 3.2.2 and 3.2.3 specify, with their own names
+//! and values. The expectations were not produced by this crate: the canonical
+//! text comes from an ECMAScript `JSON.stringify` reference run, the digests
+//! from an independent SHA-256.
 //!
 //! `make test` runs this file twice: once with `serde_json`'s default
 //! `BTreeMap`-backed `Map` (scalar-value key order) and once with
@@ -92,8 +94,8 @@ fn vector_file_covers_the_required_cases() {
         .map(|vector| field(vector, "name"))
         .collect();
     for required in [
-        "rfc8785-3.2.2-primitives",
-        "rfc8785-3.2.3-sorting",
+        "sec-3.2.2-literals-numbers-escapes",
+        "sec-3.2.3-member-sorting",
         "utf16-order-differs-from-code-point-order",
         "non-ascii-member-names",
         "floats",
@@ -103,8 +105,8 @@ fn vector_file_covers_the_required_cases() {
         assert!(names.contains(&required), "missing vector {required}");
     }
     assert!(
-        section(&file, "numbers").len() >= 24,
-        "RFC 8785 appendix B numbers"
+        section(&file, "numbers").len() >= 27,
+        "ECMAScript number formatting boundaries"
     );
 }
 
@@ -139,9 +141,10 @@ fn ordering_vector_is_order_sensitive() {
     );
 }
 
-/// PLAT-987 AC-2: RFC 8785 appendix B, IEEE 754 bit patterns to number text.
+/// PLAT-987 AC-2: IEEE 754 doubles at the ECMAScript formatting boundaries
+/// (RFC 8785 section 3.2.2.3), bit pattern to number text.
 #[test]
-fn rfc8785_appendix_b_numbers() {
+fn ecmascript_number_formatting_boundaries() {
     let file = vectors_file();
     for number in section(&file, "numbers") {
         let name = field(number, "name");
@@ -151,9 +154,9 @@ fn rfc8785_appendix_b_numbers() {
     }
 }
 
-/// RFC 8785 §3.2.2.3: NaN and the infinities have no encoding.
+/// RFC 8785 section 3.2.2.3: NaN and the infinities have no encoding.
 #[test]
-fn rfc8785_non_finite_numbers_are_refused() {
+fn non_finite_numbers_are_refused() {
     let file = vectors_file();
     let refused = section(&file, "refused_numbers");
     assert_eq!(refused.len(), 3);

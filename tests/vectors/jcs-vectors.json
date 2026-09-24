@@ -2,18 +2,18 @@
   "version": "quire.canonical.jcs-vectors/v1",
   "vectors": [
     {
-      "name": "rfc8785-3.2.2-primitives",
-      "source": "RFC 8785 section 3.2.2",
-      "preimage": {"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],"string":"\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"\/","literals":[null,true,false]},
-      "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
-      "sha256": "2d5e01a318d0f0879ab568c4be289c8b1f64ef8921a53c6277d5e069978baacb"
+      "name": "sec-3.2.2-literals-numbers-escapes",
+      "source": "quire-canonical original; exercises the properties of RFC 8785 section 3.2.2",
+      "preimage": {"values":[123456789.87654321,5E40,7.250,3e-4,0.00000000000000000000000000000042,-0.0,6.02214076e23],"text":"\u00a3#\u0007\u000dZ\u0022\u005c\/\u0041\u001B\u2603","flags":[true,null,false]},
+      "canonical": "{\"flags\":[true,null,false],\"text\":\"\u00a3#\\u0007\\rZ\\\"\\\\/A\\u001b\u2603\",\"values\":[123456789.87654321,5e+40,7.25,0.0003,4.2e-31,0,6.02214076e+23]}",
+      "sha256": "6cac8386d257c56f5c3d5e8c6774056b7587940ccc6fce5e4d9ffdb27d376e4a"
     },
     {
-      "name": "rfc8785-3.2.3-sorting",
-      "source": "RFC 8785 section 3.2.3",
-      "preimage": {"\u20ac":"Euro Sign","\r":"Carriage Return","\ufb33":"Hebrew Letter Dalet With Dagesh","1":"One","\ud83d\ude00":"Emoji: Grinning Face","\u0080":"Control","\u00f6":"Latin Small Letter O With Diaeresis"},
-      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}",
-      "sha256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c"
+      "name": "sec-3.2.3-member-sorting",
+      "source": "quire-canonical original; exercises the properties of RFC 8785 section 3.2.3, including U+1D11E (non-BMP) against U+FF21 (U+E000..U+FFFF)",
+      "preimage": {"\u4e2d":"cjk ideograph","\uff21":"fullwidth latin a","\n":"line feed","Z":"ascii capital","\ud834\udd1e":"musical symbol g clef","9":"digit","\u00e7":"c cedilla","\u00a0":"no-break space"},
+      "canonical": "{\"\\n\":\"line feed\",\"9\":\"digit\",\"Z\":\"ascii capital\",\"\u00a0\":\"no-break space\",\"\u00e7\":\"c cedilla\",\"\u4e2d\":\"cjk ideograph\",\"\ud834\udd1e\":\"musical symbol g clef\",\"\uff21\":\"fullwidth latin a\"}",
+      "sha256": "94c7a78ce7abec50cb924e9bb804b8cde9002725b5d40ecd132bd4793cdf8c47"
     },
     {
       "name": "utf16-order-differs-from-code-point-order",
@@ -87,34 +87,37 @@
     }
   ],
   "numbers": [
-    {"name": "zero", "ieee754": "0000000000000000", "canonical": "0"},
-    {"name": "minus-zero", "ieee754": "8000000000000000", "canonical": "0"},
-    {"name": "min-positive", "ieee754": "0000000000000001", "canonical": "5e-324"},
-    {"name": "min-negative", "ieee754": "8000000000000001", "canonical": "-5e-324"},
-    {"name": "max-positive", "ieee754": "7fefffffffffffff", "canonical": "1.7976931348623157e+308"},
-    {"name": "max-negative", "ieee754": "ffefffffffffffff", "canonical": "-1.7976931348623157e+308"},
-    {"name": "max-safe-integer-plus-one", "ieee754": "4340000000000000", "canonical": "9007199254740992"},
-    {"name": "min-safe-integer-minus-one", "ieee754": "c340000000000000", "canonical": "-9007199254740992"},
-    {"name": "large-integer-fixed", "ieee754": "4430000000000000", "canonical": "295147905179352830000"},
-    {"name": "below-1e23", "ieee754": "44b52d02c7e14af5", "canonical": "9.999999999999997e+22"},
-    {"name": "at-1e23", "ieee754": "44b52d02c7e14af6", "canonical": "1e+23"},
-    {"name": "above-1e23", "ieee754": "44b52d02c7e14af7", "canonical": "1.0000000000000001e+23"},
-    {"name": "below-1e21-a", "ieee754": "444b1ae4d6e2ef4e", "canonical": "999999999999999700000"},
-    {"name": "below-1e21-b", "ieee754": "444b1ae4d6e2ef4f", "canonical": "999999999999999900000"},
-    {"name": "at-1e21", "ieee754": "444b1ae4d6e2ef50", "canonical": "1e+21"},
-    {"name": "below-1e-6", "ieee754": "3eb0c6f7a0b5ed8c", "canonical": "9.999999999999997e-7"},
-    {"name": "at-1e-6", "ieee754": "3eb0c6f7a0b5ed8d", "canonical": "0.000001"},
-    {"name": "third-a", "ieee754": "41b3de4355555553", "canonical": "333333333.3333332"},
-    {"name": "third-b", "ieee754": "41b3de4355555554", "canonical": "333333333.33333325"},
-    {"name": "third-c", "ieee754": "41b3de4355555555", "canonical": "333333333.3333333"},
-    {"name": "third-d", "ieee754": "41b3de4355555556", "canonical": "333333333.3333334"},
-    {"name": "third-e", "ieee754": "41b3de4355555557", "canonical": "333333333.33333343"},
-    {"name": "negative-small-fixed", "ieee754": "becbf647612f3696", "canonical": "-0.0000033333333333333333"},
-    {"name": "fraction-at-precision-limit", "ieee754": "43143ff3c1cb0959", "canonical": "1424953923781206.2"}
+    {"name": "one-third", "ieee754": "3fd5555555555555", "canonical": "0.3333333333333333"},
+    {"name": "negative-zero", "ieee754": "8000000000000000", "canonical": "0"},
+    {"name": "positive-zero", "ieee754": "0000000000000000", "canonical": "0"},
+    {"name": "exponent-threshold-1e21", "ieee754": "444b1ae4d6e2ef50", "canonical": "1e+21"},
+    {"name": "just-below-1e21", "ieee754": "444b1ae4d6e2ef4f", "canonical": "999999999999999900000"},
+    {"name": "largest-fixed-1e20", "ieee754": "4415af1d78b58c40", "canonical": "100000000000000000000"},
+    {"name": "small-threshold-1e-7", "ieee754": "3e7ad7f29abcaf48", "canonical": "1e-7"},
+    {"name": "just-above-1e-7", "ieee754": "3e7ad7f29abcaf49", "canonical": "1.0000000000000001e-7"},
+    {"name": "fixed-1e-6", "ieee754": "3eb0c6f7a0b5ed8d", "canonical": "0.000001"},
+    {"name": "just-below-1e-6", "ieee754": "3eb0c6f7a0b5ed8c", "canonical": "9.999999999999997e-7"},
+    {"name": "largest-double", "ieee754": "7fefffffffffffff", "canonical": "1.7976931348623157e+308"},
+    {"name": "negative-largest-double", "ieee754": "ffefffffffffffff", "canonical": "-1.7976931348623157e+308"},
+    {"name": "smallest-subnormal", "ieee754": "0000000000000001", "canonical": "5e-324"},
+    {"name": "smallest-normal", "ieee754": "0010000000000000", "canonical": "2.2250738585072014e-308"},
+    {"name": "two-pow-53", "ieee754": "4340000000000000", "canonical": "9007199254740992"},
+    {"name": "two-pow-53-minus-one", "ieee754": "433fffffffffffff", "canonical": "9007199254740991"},
+    {"name": "negative-two-pow-53", "ieee754": "c340000000000000", "canonical": "-9007199254740992"},
+    {"name": "two-pow-63", "ieee754": "43e0000000000000", "canonical": "9223372036854776000"},
+    {"name": "tenth-plus-fifth", "ieee754": "3fd3333333333334", "canonical": "0.30000000000000004"},
+    {"name": "one-tenth", "ieee754": "3fb999999999999a", "canonical": "0.1"},
+    {"name": "seventeen-digit-mantissa", "ieee754": "437b69b4ba630f35", "canonical": "123456789012345680"},
+    {"name": "negative-small-fraction", "ieee754": "bde49da7e361ce4c", "canonical": "-1.5e-10"},
+    {"name": "just-above-one", "ieee754": "3ff0000000000001", "canonical": "1.0000000000000002"},
+    {"name": "large-exponent-integer", "ieee754": "44b52d02c7e14af6", "canonical": "1e+23"},
+    {"name": "just-below-1e23", "ieee754": "44b52d02c7e14af5", "canonical": "9.999999999999997e+22"},
+    {"name": "four-point-three-five", "ieee754": "4011666666666666", "canonical": "4.35"},
+    {"name": "one-hundred", "ieee754": "4059000000000000", "canonical": "100"}
   ],
   "refused_numbers": [
-    {"name": "nan", "ieee754": "7fffffffffffffff"},
-    {"name": "positive-infinity", "ieee754": "7ff0000000000000"},
-    {"name": "negative-infinity", "ieee754": "fff0000000000000"}
+    {"name": "quiet-nan", "ieee754": "7ff8000000000000"},
+    {"name": "negative-infinity", "ieee754": "fff0000000000000"},
+    {"name": "positive-infinity", "ieee754": "7ff0000000000000"}
   ]
 }
