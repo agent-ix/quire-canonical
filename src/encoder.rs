@@ -2,27 +2,40 @@
 // Copyright (C) 2026 Agent-IX
 //! The streaming RFC 8785 encoder: a [`serde::Serializer`] over a [`Sink`].
 //!
-//! # Streaming and the one buffer it needs
+//! # What streams and what is buffered
 //!
 //! Scalars, strings and arrays go straight to their destination. Objects
 //! cannot: RFC 8785 orders members by name, and `Serialize` hands members over
-//! in whatever order the value holds them. So each open object keeps its
-//! members' encoded bytes (name, `:`, value) in a [`Frame`] until it closes,
-//! then sorts them by UTF-16 code unit and moves them, comma-separated, to its
-//! own destination: the enclosing member's buffer, or the sink at the top
-//! level. Nothing else is buffered; there is no `String` of the whole text and
-//! no `serde_json::Value`.
+//! in whatever order the value holds them. So each open object keeps a
+//! [`Frame`]: one byte buffer holding its members' canonical bytes
+//! (`"name":value`) back to back, and one 8-byte offset pair per member. When
+//! the object closes, the offsets are sorted by the names' UTF-16 code units,
+//! read straight out of the buffer (no second copy of the names), and the
+//! members move, comma-separated, to the object's own destination: the
+//! enclosing frame's buffer, or the sink at the top level.
 //!
-//! # The meter
+//! Consequently a top-level array streams element by element, but a
+//! top-level *object* is held whole until it closes, and the sink sees its
+//! first byte only then. There is no `String` of the whole text and no
+//! `serde_json::Value`, but there is this buffer.
 //!
-//! Every byte of canonical text is counted once, when it is produced. Bytes
-//! moved from a closed object's buffer to its parent are already counted. The
-//! count at any point is therefore the length of the canonical text produced
-//! so far, and the bytes held in member buffers are a subset of it: the one
-//! [`Limits::max_bytes`] ceiling bounds both the output and the sort buffers.
-//! Member names are additionally kept unescaped for sorting; an unescaped name
-//! is never longer than its escaped form, so they add at most the same again.
-//! Every reservation uses `try_reserve`.
+//! # Bounds
+//!
+//! Every byte of canonical text is counted once, when it is produced, against
+//! [`Limits::max_bytes`]; bytes moved from a closed frame to its parent are not
+//! counted again. Frame buffers only ever hold produced bytes, so their total
+//! length never exceeds the ceiling. What the ceiling does not count:
+//!
+//! * the transient second copy while a closing object's members move into its
+//!   parent (at most the size of that object);
+//! * the 8 bytes of offsets per buffered member;
+//! * `Vec` growth slack (amortized doubling, up to the length again).
+//!
+//! `tests/memory.rs` measures the peak heap of the worst shape, a flat object
+//! of small members, and keeps it under 4x the canonical length. Buffers and
+//! offset vectors grow with `try_reserve`, so exhausting memory is a refusal,
+//! not an abort; the fixed-size frame records and integer map-key text are
+//! ordinary allocations.
 
 use std::fmt;
 
@@ -30,29 +43,32 @@ use serde::ser::{self, Impossible, Serialize};
 
 use crate::escape::escape_fragment;
 use crate::number::{exact_double, with_double_text};
-use crate::order::cmp_utf16;
+use crate::order::{cmp_member_names, Unescaped};
 use crate::sink::try_extend;
-use crate::{Error, LimitExceeded, LimitKind, Limits, Sink};
+use crate::{Error, LimitExceeded, LimitKind, Limits, ProtocolViolation, Sink};
 
 /// Struct names `serde_json` uses for its private tokens
 /// (`arbitrary_precision` numbers, `RawValue`).
 const SERDE_JSON_PRIVATE_PREFIX: &str = "$serde_json::private::";
 
-/// One object member being or having been encoded.
-#[derive(Default)]
-struct Member {
-    /// The unescaped name, compared for ordering.
-    name: String,
-    /// `"name":value`, escaped and canonical.
-    bytes: Vec<u8>,
+/// Where one member's canonical bytes (`"name":value`) sit in its frame's
+/// buffer.
+#[derive(Clone, Copy)]
+struct Span {
+    start: u32,
+    end: u32,
 }
 
-/// An object that is open: its finished members and the one being built.
+/// An open object.
 #[derive(Default)]
 struct Frame {
-    members: Vec<Member>,
-    building: Member,
-    has_name: bool,
+    /// Finished members' canonical bytes, then the one being written.
+    buffer: Vec<u8>,
+    /// Finished members, in the order they were written.
+    members: Vec<Span>,
+    /// Where the member being written starts, once its name is written and
+    /// until its value is.
+    pending: Option<u32>,
 }
 
 /// Encodes one value into a sink. Created and consumed by [`crate::encode`].
@@ -83,7 +99,7 @@ impl<'s, S: Sink + ?Sized> Encoder<'s, S> {
     /// Move already-counted bytes to the current destination.
     fn emit(&mut self, bytes: &[u8]) -> Result<(), Error> {
         match self.frames.last_mut() {
-            Some(frame) => try_extend(&mut frame.building.bytes, bytes),
+            Some(frame) => try_extend(&mut frame.buffer, bytes),
             None => self.sink.write_bytes(bytes),
         }
     }
@@ -153,61 +169,90 @@ impl<'s, S: Sink + ?Sized> Encoder<'s, S> {
         Ok(())
     }
 
+    fn top_frame(&mut self) -> Result<&mut Frame, Error> {
+        self.frames.last_mut().ok_or(Error::Internal {
+            invariant: "object members are only written inside an open object",
+        })
+    }
+
+    /// Write `"name":` as the start of a new member of the innermost object.
     fn begin_member(&mut self, name: &str) -> Result<(), Error> {
         let frame = self.top_frame()?;
-        frame.building.name = try_string(name)?;
-        frame.has_name = true;
+        if frame.pending.is_some() {
+            return Err(Error::Protocol(ProtocolViolation::NameWithoutValue));
+        }
+        frame.pending = Some(buffer_offset(&frame.buffer)?);
         self.string(name)?;
         self.produce(b":")
     }
 
+    /// The member's value has been written; record the finished member.
     fn end_member(&mut self) -> Result<(), Error> {
         let frame = self.top_frame()?;
-        frame.has_name = false;
+        let start = frame
+            .pending
+            .take()
+            .ok_or(Error::Protocol(ProtocolViolation::ValueWithoutName))?;
+        let end = buffer_offset(&frame.buffer)?;
         frame
             .members
             .try_reserve(1)
-            .map_err(|_| allocation_of::<Member>(1))?;
-        let member = std::mem::take(&mut frame.building);
-        frame.members.push(member);
+            .map_err(|_| allocation_of::<Span>(1))?;
+        frame.members.push(Span { start, end });
         Ok(())
     }
 
     fn close_object(&mut self) -> Result<(), Error> {
-        let Some(mut frame) = self.frames.pop() else {
-            return Err(Error::Serialize(
-                "object closed that was never opened".to_owned(),
-            ));
+        let frame = self.frames.pop().ok_or(Error::Internal {
+            invariant: "every object close matches an open",
+        })?;
+        if frame.pending.is_some() {
+            return Err(Error::Protocol(ProtocolViolation::ObjectEndedAfterName));
+        }
+        let Frame {
+            buffer,
+            mut members,
+            pending: _,
+        } = frame;
+        let bytes_of = |span: Span| {
+            let start = usize::try_from(span.start).ok();
+            let end = usize::try_from(span.end).ok();
+            start
+                .zip(end)
+                .and_then(|(start, end)| buffer.get(start..end))
+                .ok_or(Error::Internal {
+                    invariant: "member spans lie inside their frame buffer",
+                })
         };
         // Unstable sort: in place, no allocation. Names are unique (checked
-        // next), so stability cannot matter.
-        frame
-            .members
-            .sort_unstable_by(|left, right| cmp_utf16(&left.name, &right.name));
-        if let Some([duplicate, _]) = frame
-            .members
-            .windows(2)
-            .find(|pair| matches!(pair, [left, right] if left.name == right.name))
-        {
-            return Err(Error::DuplicateMemberName {
-                name: duplicate.name.clone(),
-            });
+        // next), so stability cannot matter. A span outside the buffer sorts
+        // as empty here and is refused below.
+        members.sort_unstable_by(|left, right| {
+            cmp_member_names(
+                bytes_of(*left).unwrap_or_default(),
+                bytes_of(*right).unwrap_or_default(),
+            )
+        });
+        for (index, span) in members.iter().enumerate() {
+            let member = bytes_of(*span)?;
+            if let Some(next) = members.get(index + 1) {
+                if cmp_member_names(member, bytes_of(*next)?).is_eq() {
+                    let name: Vec<u8> = Unescaped::member_name(member).collect();
+                    return Err(Error::DuplicateMemberName {
+                        name: String::from_utf8_lossy(&name).into_owned(),
+                    });
+                }
+            }
         }
-        for (index, member) in frame.members.iter().enumerate() {
+        for (index, span) in members.iter().enumerate() {
             if index > 0 {
                 self.produce(b",")?;
             }
-            self.emit(&member.bytes)?;
+            self.emit(bytes_of(*span)?)?;
         }
         self.produce(b"}")?;
         self.leave();
         Ok(())
-    }
-
-    fn top_frame(&mut self) -> Result<&mut Frame, Error> {
-        self.frames
-            .last_mut()
-            .ok_or_else(|| Error::Serialize("object member written outside an object".to_owned()))
     }
 
     /// `{"variant":` — the wrapper serde's externally tagged enums use.
@@ -225,21 +270,22 @@ impl<'s, S: Sink + ?Sized> Encoder<'s, S> {
     }
 }
 
+/// The current end of a frame buffer as a 32-bit member offset.
+fn buffer_offset(buffer: &[u8]) -> Result<u32, Error> {
+    u32::try_from(buffer.len()).map_err(|_| {
+        LimitExceeded {
+            kind: LimitKind::ObjectBytes,
+            bound: u64::from(u32::MAX),
+            required: u64::try_from(buffer.len()).unwrap_or(u64::MAX),
+        }
+        .into()
+    })
+}
+
 fn allocation_of<T>(count: usize) -> Error {
     Error::Allocation {
         requested: std::mem::size_of::<T>().saturating_mul(count),
     }
-}
-
-fn try_string(text: &str) -> Result<String, Error> {
-    let mut owned = String::new();
-    owned
-        .try_reserve_exact(text.len())
-        .map_err(|_| Error::Allocation {
-            requested: text.len(),
-        })?;
-    owned.push_str(text);
-    Ok(owned)
 }
 
 /// An array (or tuple) in progress.
@@ -579,16 +625,12 @@ impl<S: Sink + ?Sized> ser::SerializeMap for Object<'_, '_, S> {
     type Error = Error;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Error> {
-        let name = key.serialize(MemberName)?;
-        self.encoder.begin_member(&name)
+        key.serialize(MemberName {
+            encoder: &mut *self.encoder,
+        })
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
-        if !self.encoder.top_frame()?.has_name {
-            return Err(Error::Serialize(
-                "SerializeMap::serialize_value called before serialize_key".to_owned(),
-            ));
-        }
         value.serialize(&mut *self.encoder)?;
         self.encoder.end_member()
     }
@@ -632,73 +674,123 @@ impl<S: Sink + ?Sized> ser::SerializeStructVariant for Object<'_, '_, S> {
     }
 }
 
-/// Turns a map key into a member name. JSON names are strings; like
-/// `serde_json`, integer and `char` keys are accepted by their decimal or
-/// literal text, and everything else is refused.
-struct MemberName;
+/// Turns a map key into a member name and writes it, with no intermediate
+/// copy for string keys. JSON names are strings; like `serde_json`, integer
+/// and `char` keys are accepted by their decimal or literal text, and
+/// everything else is refused.
+struct MemberName<'a, 's, S: Sink + ?Sized> {
+    encoder: &'a mut Encoder<'s, S>,
+}
+
+impl<S: Sink + ?Sized> MemberName<'_, '_, S> {
+    fn decimal(self, value: impl fmt::Display) -> Result<(), Error> {
+        // 40 bytes holds any i128/u128 in decimal.
+        let mut text = DecimalText::default();
+        fmt::write(&mut text, format_args!("{value}")).map_err(|_| Error::Internal {
+            invariant: "integer decimal text fits 40 bytes",
+        })?;
+        let name = text.as_str().ok_or(Error::Internal {
+            invariant: "integer decimal text is ASCII",
+        })?;
+        self.encoder.begin_member(name)
+    }
+}
+
+/// A fixed stack buffer for an integer's decimal text.
+struct DecimalText {
+    bytes: [u8; 40],
+    length: usize,
+}
+
+impl Default for DecimalText {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 40],
+            length: 0,
+        }
+    }
+}
+
+impl DecimalText {
+    fn as_str(&self) -> Option<&str> {
+        std::str::from_utf8(self.bytes.get(..self.length)?).ok()
+    }
+}
+
+impl fmt::Write for DecimalText {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.length.checked_add(text.len()).ok_or(fmt::Error)?;
+        self.bytes
+            .get_mut(self.length..end)
+            .ok_or(fmt::Error)?
+            .copy_from_slice(text.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
 
 fn non_string(found: &'static str) -> Error {
     Error::NonStringMemberName { found }
 }
 
-impl ser::Serializer for MemberName {
-    type Ok = String;
+impl<S: Sink + ?Sized> ser::Serializer for MemberName<'_, '_, S> {
+    type Ok = ();
     type Error = Error;
-    type SerializeSeq = Impossible<String, Error>;
-    type SerializeTuple = Impossible<String, Error>;
-    type SerializeTupleStruct = Impossible<String, Error>;
-    type SerializeTupleVariant = Impossible<String, Error>;
-    type SerializeMap = Impossible<String, Error>;
-    type SerializeStruct = Impossible<String, Error>;
-    type SerializeStructVariant = Impossible<String, Error>;
+    type SerializeSeq = Impossible<(), Error>;
+    type SerializeTuple = Impossible<(), Error>;
+    type SerializeTupleStruct = Impossible<(), Error>;
+    type SerializeTupleVariant = Impossible<(), Error>;
+    type SerializeMap = Impossible<(), Error>;
+    type SerializeStruct = Impossible<(), Error>;
+    type SerializeStructVariant = Impossible<(), Error>;
 
-    fn serialize_str(self, value: &str) -> Result<String, Error> {
-        try_string(value)
+    fn serialize_str(self, value: &str) -> Result<(), Error> {
+        self.encoder.begin_member(value)
     }
 
-    fn serialize_char(self, value: char) -> Result<String, Error> {
+    fn serialize_char(self, value: char) -> Result<(), Error> {
         let mut buffer = [0_u8; 4];
-        try_string(value.encode_utf8(&mut buffer))
+        self.encoder.begin_member(value.encode_utf8(&mut buffer))
     }
 
-    fn serialize_i8(self, value: i8) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_i8(self, value: i8) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_i16(self, value: i16) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_i16(self, value: i16) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_i32(self, value: i32) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_i32(self, value: i32) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_i64(self, value: i64) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_i64(self, value: i64) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_i128(self, value: i128) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_i128(self, value: i128) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_u8(self, value: u8) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_u8(self, value: u8) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_u16(self, value: u16) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_u16(self, value: u16) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_u32(self, value: u32) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_u32(self, value: u32) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_u64(self, value: u64) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_u64(self, value: u64) -> Result<(), Error> {
+        self.decimal(value)
     }
 
-    fn serialize_u128(self, value: u128) -> Result<String, Error> {
-        Ok(value.to_string())
+    fn serialize_u128(self, value: u128) -> Result<(), Error> {
+        self.decimal(value)
     }
 
     fn serialize_unit_variant(
@@ -706,47 +798,47 @@ impl ser::Serializer for MemberName {
         _name: &'static str,
         _index: u32,
         variant: &'static str,
-    ) -> Result<String, Error> {
-        try_string(variant)
+    ) -> Result<(), Error> {
+        self.encoder.begin_member(variant)
     }
 
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
         self,
         _name: &'static str,
         value: &T,
-    ) -> Result<String, Error> {
+    ) -> Result<(), Error> {
         value.serialize(self)
     }
 
-    fn serialize_bool(self, _value: bool) -> Result<String, Error> {
+    fn serialize_bool(self, _value: bool) -> Result<(), Error> {
         Err(non_string("bool"))
     }
 
-    fn serialize_f32(self, _value: f32) -> Result<String, Error> {
+    fn serialize_f32(self, _value: f32) -> Result<(), Error> {
         Err(non_string("f32"))
     }
 
-    fn serialize_f64(self, _value: f64) -> Result<String, Error> {
+    fn serialize_f64(self, _value: f64) -> Result<(), Error> {
         Err(non_string("f64"))
     }
 
-    fn serialize_bytes(self, _value: &[u8]) -> Result<String, Error> {
+    fn serialize_bytes(self, _value: &[u8]) -> Result<(), Error> {
         Err(non_string("bytes"))
     }
 
-    fn serialize_none(self) -> Result<String, Error> {
+    fn serialize_none(self) -> Result<(), Error> {
         Err(non_string("none"))
     }
 
-    fn serialize_some<T: Serialize + ?Sized>(self, _value: &T) -> Result<String, Error> {
+    fn serialize_some<T: Serialize + ?Sized>(self, _value: &T) -> Result<(), Error> {
         Err(non_string("some"))
     }
 
-    fn serialize_unit(self) -> Result<String, Error> {
+    fn serialize_unit(self) -> Result<(), Error> {
         Err(non_string("unit"))
     }
 
-    fn serialize_unit_struct(self, _name: &'static str) -> Result<String, Error> {
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<(), Error> {
         Err(non_string("unit struct"))
     }
 
@@ -756,7 +848,7 @@ impl ser::Serializer for MemberName {
         _index: u32,
         _variant: &'static str,
         _value: &T,
-    ) -> Result<String, Error> {
+    ) -> Result<(), Error> {
         Err(non_string("newtype variant"))
     }
 

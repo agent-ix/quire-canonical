@@ -13,7 +13,7 @@ help:
 	@echo "  make test             - cargo test, default and preserve_order lanes"
 	@echo "  make build            - Release build"
 	@echo "  make clean            - cargo clean"
-	@echo "  make deny             - cargo deny check licenses"
+	@echo "  make deny             - cargo deny check (advisories, bans, licenses, sources)"
 	@echo "  make audit-unsafe     - Enforce // SAFETY: comments on unsafe blocks"
 	@echo "  make docs             - cargo doc, denying missing/broken doc links"
 	@echo "  make ci               - All CI gates locally (fmt-check + lint + test + deny + audit-unsafe + docs)"
@@ -63,7 +63,7 @@ clean:
 
 .PHONY: deny
 deny:
-	$(CARGO) deny check licenses
+	$(CARGO) deny check
 
 .PHONY: cargo-audit
 cargo-audit:

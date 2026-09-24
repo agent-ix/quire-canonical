@@ -6,11 +6,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 
-use quire_canonical::{encode, sha256, sha256_with_prefix, to_vec, Error, Limits, WriteSink};
+use quire_canonical::{
+    encode, sha256, sha256_with_domain, to_vec, Error, Limits, ProtocolViolation, WriteSink,
+};
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::Serialize;
 
-const LIMITS: Limits = Limits::new(1 << 16, 32);
+const LIMITS: Limits = match Limits::new(1 << 16, 32) {
+    Ok(limits) => limits,
+    Err(_) => panic!("depth within MAX_DEPTH"),
+};
 
 fn canonical<T: Serialize + ?Sized>(value: &T) -> String {
     String::from_utf8(to_vec(value, LIMITS).expect("encodes")).expect("UTF-8")
@@ -151,22 +156,115 @@ impl Serialize for Shown {
 fn collect_str_is_escaped_and_metered() {
     assert_eq!(canonical(&Shown), "\"say \\\"hi\\\"\\n\\u0001\"");
     assert!(matches!(
-        to_vec(&Shown, Limits::new(5, 1)),
+        to_vec(&Shown, Limits::new(5, 1).expect("valid")),
         Err(Error::Limit(_))
     ));
 }
 
 #[test]
-fn prefixed_digest_is_the_digest_of_prefix_then_canonical_bytes() {
+fn domain_digest_is_length_prefixed_label_then_canonical_bytes() {
     use sha2::Digest as _;
     let value = BTreeMap::from([("k", 1)]);
-    let prefixed = sha256_with_prefix(b"domain\0", &value, LIMITS).expect("hashes");
+    let digest = sha256_with_domain(b"domain", &value, LIMITS).expect("hashes");
     let expected: [u8; 32] = sha2::Sha256::new()
-        .chain_update(b"domain\0{\"k\":1}")
+        .chain_update(6_u64.to_be_bytes())
+        .chain_update(b"domain{\"k\":1}")
         .finalize()
         .into();
-    assert_eq!(prefixed.as_bytes(), &expected);
-    assert_ne!(sha256(&value, LIMITS).expect("hashes"), prefixed);
+    assert_eq!(digest.as_bytes(), &expected);
+    assert_ne!(sha256(&value, LIMITS).expect("hashes"), digest);
+}
+
+/// FND-004: without the length prefix, `"tag"` + `12` and `"tag1"` + `2` both
+/// hashed `tag12`.
+#[test]
+fn domain_label_and_text_cannot_be_reassociated() {
+    let first = sha256_with_domain(b"tag", &12_u8, LIMITS).expect("hashes");
+    let second = sha256_with_domain(b"tag1", &2_u8, LIMITS).expect("hashes");
+    assert_ne!(first, second);
+    let empty = sha256_with_domain(b"", &1_u8, LIMITS).expect("hashes");
+    assert_ne!(empty, sha256(&1_u8, LIMITS).expect("hashes"));
+}
+
+/// A map driven through the `SerializeMap` calls in `steps`.
+struct Driven(&'static [Step]);
+
+#[derive(Clone, Copy)]
+enum Step {
+    Key(&'static str),
+    Value(u8),
+    Entry(&'static str, u8),
+}
+
+impl Serialize for Driven {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        for step in self.0 {
+            match *step {
+                Step::Key(key) => map.serialize_key(key)?,
+                Step::Value(value) => map.serialize_value(&value)?,
+                Step::Entry(key, value) => map.serialize_entry(key, &value)?,
+            }
+        }
+        map.end()
+    }
+}
+
+fn violation(steps: &'static [Step]) -> Option<ProtocolViolation> {
+    let mut sink = Vec::new();
+    match encode(&mut sink, &Driven(steps), LIMITS) {
+        Err(Error::Protocol(violation)) => Some(violation),
+        Ok(written) => panic!(
+            "accepted {:?} ({written} bytes)",
+            String::from_utf8_lossy(&sink)
+        ),
+        Err(other) => panic!("unexpected error {other:?}"),
+    }
+}
+
+/// FND-001: two keys in a row used to produce `{"a":"b":1}` as success.
+#[test]
+fn a_second_key_before_a_value_is_refused() {
+    assert_eq!(
+        violation(&[Step::Key("a"), Step::Key("b"), Step::Value(1)]),
+        Some(ProtocolViolation::NameWithoutValue)
+    );
+}
+
+/// FND-001: a trailing key used to be dropped silently, with `encode`
+/// reporting more bytes than it wrote.
+#[test]
+fn ending_a_map_after_a_key_is_refused() {
+    assert_eq!(
+        violation(&[Step::Entry("z", 1), Step::Key("a")]),
+        Some(ProtocolViolation::ObjectEndedAfterName)
+    );
+}
+
+/// FND-007: a value with no key is refused before it is written.
+#[test]
+fn a_value_without_a_key_is_refused() {
+    assert_eq!(
+        violation(&[Step::Value(1)]),
+        Some(ProtocolViolation::ValueWithoutName)
+    );
+    assert_eq!(
+        violation(&[Step::Entry("a", 1), Step::Value(2)]),
+        Some(ProtocolViolation::ValueWithoutName)
+    );
+}
+
+#[test]
+fn well_ordered_key_value_calls_still_encode() {
+    let mut sink = Vec::new();
+    let written = encode(
+        &mut sink,
+        &Driven(&[Step::Key("b"), Step::Value(1), Step::Entry("a", 2)]),
+        LIMITS,
+    )
+    .expect("encodes");
+    assert_eq!(sink, b"{\"a\":2,\"b\":1}");
+    assert_eq!(written, u64::try_from(sink.len()).expect("fits"));
 }
 
 /// A writer that refuses everything.

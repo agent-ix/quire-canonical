@@ -20,7 +20,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 const VECTORS: &str = include_str!("vectors/jcs-vectors.json");
-const LIMITS: Limits = Limits::new(1 << 20, 64);
+const LIMITS: Limits = match Limits::new(1 << 20, 64) {
+    Ok(limits) => limits,
+    Err(_) => panic!("depth within MAX_DEPTH"),
+};
 
 fn vectors_file() -> Value {
     serde_json::from_str(VECTORS).expect("vector file is JSON")
