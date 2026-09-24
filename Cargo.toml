@@ -1,0 +1,22 @@
+[package]
+name = "quire-canonical"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes."
+authors = ["Agent IX <peter@agent-ix.ai>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/agent-ix/quire-canonical"
+publish = false
+
+[lib]
+name = "quire_canonical"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
