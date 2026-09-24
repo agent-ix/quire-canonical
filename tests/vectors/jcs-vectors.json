@@ -1,0 +1,120 @@
+{
+  "version": "quire.canonical.jcs-vectors/v1",
+  "vectors": [
+    {
+      "name": "rfc8785-3.2.2-primitives",
+      "source": "RFC 8785 section 3.2.2",
+      "preimage": {"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],"string":"\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"\/","literals":[null,true,false]},
+      "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+      "sha256": "2d5e01a318d0f0879ab568c4be289c8b1f64ef8921a53c6277d5e069978baacb"
+    },
+    {
+      "name": "rfc8785-3.2.3-sorting",
+      "source": "RFC 8785 section 3.2.3",
+      "preimage": {"\u20ac":"Euro Sign","\r":"Carriage Return","\ufb33":"Hebrew Letter Dalet With Dagesh","1":"One","\ud83d\ude00":"Emoji: Grinning Face","\u0080":"Control","\u00f6":"Latin Small Letter O With Diaeresis"},
+      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}",
+      "sha256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c"
+    },
+    {
+      "name": "utf16-order-differs-from-code-point-order",
+      "source": "quire-canonical: U+10000 (UTF-16 D800 DC00) sorts before U+E000 and U+FFFD by code unit, after them by code point",
+      "preimage": {"\ufffd":"replacement character","\ue000":"private use","\ud800\udc00":"linear b syllable","~":"ascii"},
+      "canonical": "{\"~\":\"ascii\",\"\ud800\udc00\":\"linear b syllable\",\"\ue000\":\"private use\",\"\ufffd\":\"replacement character\"}",
+      "sha256": "92db26f128112e2cff308fdb745df46fce2e05bafec031a418ef9536f7c1b5ec"
+    },
+    {
+      "name": "non-ascii-member-names",
+      "source": "quire-canonical",
+      "preimage": {"z\u00e9ro":0,"\u00f6":"o-umlaut","a":"ascii","\u65e5\u672c":"cjk","e\u0301":"decomposed e-acute is not normalized","\u00e9":"precomposed e-acute"},
+      "canonical": "{\"a\":\"ascii\",\"e\u0301\":\"decomposed e-acute is not normalized\",\"z\u00e9ro\":0,\"\u00e9\":\"precomposed e-acute\",\"\u00f6\":\"o-umlaut\",\"\u65e5\u672c\":\"cjk\"}",
+      "sha256": "ed1c214e922d4b5332be5cf0d39a835fd6aaa4786b0a87b855619c097a0605b4"
+    },
+    {
+      "name": "floats",
+      "source": "quire-canonical",
+      "preimage": {"pi":3.141592653589793,"tiny":5e-324,"big":1e21,"below-exponent":1e20,"negative-zero":-0.0,"half":0.5,"small":1e-7,"integral-float":2.0,"negative":-1.5e-10},
+      "canonical": "{\"below-exponent\":100000000000000000000,\"big\":1e+21,\"half\":0.5,\"integral-float\":2,\"negative\":-1.5e-10,\"negative-zero\":0,\"pi\":3.141592653589793,\"small\":1e-7,\"tiny\":5e-324}",
+      "sha256": "5d763321c744a331a21dc46c7f06ca1f382dca67a11550db4b9a8e09ccd0cbca"
+    },
+    {
+      "name": "empty-object",
+      "source": "quire-canonical",
+      "preimage": {},
+      "canonical": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "empty-array",
+      "source": "quire-canonical",
+      "preimage": [],
+      "canonical": "[]",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "name": "nested-empties-and-sorting-at-every-level",
+      "source": "quire-canonical",
+      "preimage": {"outer":{"y":[],"x":{}},"list":[{"b":1,"a":[{"d":null,"c":true}]},[]],"empty":{}},
+      "canonical": "{\"empty\":{},\"list\":[{\"a\":[{\"c\":true,\"d\":null}],\"b\":1},[]],\"outer\":{\"x\":{},\"y\":[]}}",
+      "sha256": "59f694133faeabbc919d0cd6874681d18bd5c2be216f6cb3072af32f3b409b2d"
+    },
+    {
+      "name": "string-escapes",
+      "source": "quire-canonical",
+      "preimage": {"controls":"\u0000\u0001\b\t\n\u000b\f\r\u001f","printable":"\"\\/\u007f","plain":"no escapes"},
+      "canonical": "{\"controls\":\"\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f\",\"plain\":\"no escapes\",\"printable\":\"\\\"\\\\/\u007f\"}",
+      "sha256": "e88e83784fe9a2fa9bd74894c75fae5b2060d851ff2962b21d7a67e0e53439cd"
+    },
+    {
+      "name": "top-level-string",
+      "source": "quire-canonical",
+      "preimage": "caf\u00e9 \ud83d\ude00",
+      "canonical": "\"caf\u00e9 \ud83d\ude00\"",
+      "sha256": "89fa4ccbaa53bc2ebec0726f73beccbe1618075d3ef9e740cf34ec284b07a66e"
+    },
+    {
+      "name": "top-level-null",
+      "source": "quire-canonical",
+      "preimage": null,
+      "canonical": "null",
+      "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    },
+    {
+      "name": "integers",
+      "source": "quire-canonical",
+      "preimage": [0,-1,9007199254740991,-9007199254740992,9007199254740992,18014398509481984,1000000000000000000000],
+      "canonical": "[0,-1,9007199254740991,-9007199254740992,9007199254740992,18014398509481984,1e+21]",
+      "sha256": "cde2c73179f408237ae9cdd78880541cf299fe9214cd02206a7e68f14748bfe6"
+    }
+  ],
+  "numbers": [
+    {"name": "zero", "ieee754": "0000000000000000", "canonical": "0"},
+    {"name": "minus-zero", "ieee754": "8000000000000000", "canonical": "0"},
+    {"name": "min-positive", "ieee754": "0000000000000001", "canonical": "5e-324"},
+    {"name": "min-negative", "ieee754": "8000000000000001", "canonical": "-5e-324"},
+    {"name": "max-positive", "ieee754": "7fefffffffffffff", "canonical": "1.7976931348623157e+308"},
+    {"name": "max-negative", "ieee754": "ffefffffffffffff", "canonical": "-1.7976931348623157e+308"},
+    {"name": "max-safe-integer-plus-one", "ieee754": "4340000000000000", "canonical": "9007199254740992"},
+    {"name": "min-safe-integer-minus-one", "ieee754": "c340000000000000", "canonical": "-9007199254740992"},
+    {"name": "large-integer-fixed", "ieee754": "4430000000000000", "canonical": "295147905179352830000"},
+    {"name": "below-1e23", "ieee754": "44b52d02c7e14af5", "canonical": "9.999999999999997e+22"},
+    {"name": "at-1e23", "ieee754": "44b52d02c7e14af6", "canonical": "1e+23"},
+    {"name": "above-1e23", "ieee754": "44b52d02c7e14af7", "canonical": "1.0000000000000001e+23"},
+    {"name": "below-1e21-a", "ieee754": "444b1ae4d6e2ef4e", "canonical": "999999999999999700000"},
+    {"name": "below-1e21-b", "ieee754": "444b1ae4d6e2ef4f", "canonical": "999999999999999900000"},
+    {"name": "at-1e21", "ieee754": "444b1ae4d6e2ef50", "canonical": "1e+21"},
+    {"name": "below-1e-6", "ieee754": "3eb0c6f7a0b5ed8c", "canonical": "9.999999999999997e-7"},
+    {"name": "at-1e-6", "ieee754": "3eb0c6f7a0b5ed8d", "canonical": "0.000001"},
+    {"name": "third-a", "ieee754": "41b3de4355555553", "canonical": "333333333.3333332"},
+    {"name": "third-b", "ieee754": "41b3de4355555554", "canonical": "333333333.33333325"},
+    {"name": "third-c", "ieee754": "41b3de4355555555", "canonical": "333333333.3333333"},
+    {"name": "third-d", "ieee754": "41b3de4355555556", "canonical": "333333333.3333334"},
+    {"name": "third-e", "ieee754": "41b3de4355555557", "canonical": "333333333.33333343"},
+    {"name": "negative-small-fixed", "ieee754": "becbf647612f3696", "canonical": "-0.0000033333333333333333"},
+    {"name": "fraction-at-precision-limit", "ieee754": "43143ff3c1cb0959", "canonical": "1424953923781206.2"}
+  ],
+  "refused_numbers": [
+    {"name": "nan", "ieee754": "7fffffffffffffff"},
+    {"name": "positive-infinity", "ieee754": "7ff0000000000000"},
+    {"name": "negative-infinity", "ieee754": "fff0000000000000"}
+  ]
+}

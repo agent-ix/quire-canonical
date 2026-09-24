@@ -8,12 +8,12 @@ Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes.
 make fmt            # format with rustfmt
 make fmt-check      # verify formatting (CI gate)
 make lint           # clippy with -D warnings
-make test           # cargo test
+make test           # cargo test, twice: default and serde_json/preserve_order lanes
 make build          # release build
 make clean          # cargo clean
 make deny           # cargo deny check licenses
 make audit-unsafe   # check that every unsafe block has a // SAFETY: comment
-make ci             # fmt-check + lint + test + deny + audit-unsafe
+make ci             # fmt-check + lint + test + deny + audit-unsafe + docs
 ```
 
 ## Safety scaffolding
@@ -30,7 +30,9 @@ Backported from `agent-ix/ecaz`:
 
 ```
 src/lib.rs             # crate root
-tests/integration.rs   # end-to-end tests
+tests/vectors.rs       # golden vectors (tests/vectors/jcs-vectors.json)
+tests/limits.rs        # byte and depth limits
+tests/encode.rs        # serde data model mapping and refusals
 benches/               # criterion benchmarks (opt-in; add criterion to dev-deps)
 spec/                  # requirements artifacts (from /spec-create-spec)
 scripts/               # local tooling
