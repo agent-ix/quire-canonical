@@ -13,9 +13,26 @@ publish = false
 name = "quire_canonical"
 path = "src/lib.rs"
 
+[features]
+# Test lane only: turns on `serde_json/preserve_order` so the golden vectors
+# run against an insertion-ordered `serde_json::Map` as well as the default
+# `BTreeMap` one. `make test` runs the suite both ways. The encoder never reads
+# this feature; its output does not depend on it.
+test-preserve-order = ["dep:serde_json", "serde_json/preserve_order"]
+
 [dependencies]
+ryu-js = "1"
+serde = "1"
+sha2 = "0.10"
+thiserror = "2"
+# Only present under `test-preserve-order`; never used by the library itself.
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip`: the vector file's float literals must parse to the exact
+# nearest double, or a vector would test the parser rather than the encoder.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 lto = "thin"

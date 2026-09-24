@@ -10,10 +10,10 @@ help:
 	@echo "  make fmt              - Format with rustfmt"
 	@echo "  make fmt-check        - Verify formatting (CI gate)"
 	@echo "  make lint             - Clippy with -D warnings"
-	@echo "  make test             - cargo test"
+	@echo "  make test             - cargo test, default and preserve_order lanes"
 	@echo "  make build            - Release build"
 	@echo "  make clean            - cargo clean"
-	@echo "  make deny             - cargo deny check licenses"
+	@echo "  make deny             - cargo deny check (advisories, bans, licenses, sources)"
 	@echo "  make audit-unsafe     - Enforce // SAFETY: comments on unsafe blocks"
 	@echo "  make docs             - cargo doc, denying missing/broken doc links"
 	@echo "  make ci               - All CI gates locally (fmt-check + lint + test + deny + audit-unsafe + docs)"
@@ -33,10 +33,21 @@ fmt-check:
 .PHONY: lint
 lint:
 	$(CARGO) clippy --all-targets -- -D warnings
+	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
+# The golden vectors run twice: against serde_json's default BTreeMap-backed
+# Map and against its preserve_order (insertion-ordered) Map. The canonical
+# bytes must be identical both ways (PLAT-987 AC-3).
 .PHONY: test
-test:
+test: test-default test-preserve-order
+
+.PHONY: test-default
+test-default:
 	$(CARGO) test
+
+.PHONY: test-preserve-order
+test-preserve-order:
+	$(CARGO) test --features test-preserve-order
 
 .PHONY: build
 build:
@@ -52,7 +63,7 @@ clean:
 
 .PHONY: deny
 deny:
-	$(CARGO) deny check licenses
+	$(CARGO) deny check
 
 .PHONY: cargo-audit
 cargo-audit:
