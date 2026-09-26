@@ -8,18 +8,30 @@
 //! `-0` versus `0`. `ryu-js` implements the ECMAScript algorithm.
 //!
 //! Every RFC 8785 number is an IEEE 754 double, so integers are encoded by
-//! their double value. Every integer of magnitude up to [`MAX_SAFE_MAGNITUDE`]
-//! holds exactly in a double; past it, encoding would either round silently or
-//! (for the exact few that happen to land on a representable double, such as
-//! `2^60`) split identical semantic values across different bit patterns
-//! depending on incidental trailing zeros. So the encoder refuses every
-//! integer past the bound, exact or not, naming the value.
+//! their double value. Below [`MAX_EXACT_INTEGER_MAGNITUDE`] every magnitude
+//! holds exactly in a double; above it, some magnitudes still land on an
+//! exact double (`2^60`, `2^100`, any value with enough trailing zero bits)
+//! while others round. Rather than accept that some-exact-some-not split, the
+//! encoder refuses every integer past the bound, exact or not, naming the
+//! value.
+//!
+//! This bound is enforced only for Rust integer types (`i8`..`i128`,
+//! `u8`..`u128`) reaching the encoder through its `serialize_i*`/
+//! `serialize_u*` methods. A JSON-text integer already too large for
+//! `u64`/`i64` is not one of these: `serde_json` itself parses it straight to
+//! an `f64` (`serde_json::Number::Float`), so it reaches this crate as a
+//! double and is encoded as one, like any other float — see
+//! `tests/encode.rs` for the pinned behaviour.
 
 use crate::Error;
 
-/// `2^53`: the largest integer magnitude that is exactly a double, and the
-/// bound past which every integer is refused rather than encoded.
-pub(crate) const MAX_SAFE_MAGNITUDE: u128 = 1 << 53;
+/// `2^53`: the largest integer magnitude every smaller magnitude, and this
+/// one, holds exactly as a double — and the bound past which every integer is
+/// refused rather than encoded, exact or not. (ECMAScript's
+/// `Number.MAX_SAFE_INTEGER` is `2^53 - 1`, one less than this bound; this
+/// crate's bound is inclusive of `2^53` itself, so the name says "exact", not
+/// "safe".)
+pub(crate) const MAX_EXACT_INTEGER_MAGNITUDE: u128 = 1 << 53;
 
 /// ECMAScript text for a finite double. Both zeros print as `0`.
 pub(crate) fn with_double_text<R>(
@@ -37,17 +49,17 @@ pub(crate) fn with_double_text<R>(
 }
 
 /// The double for an integer of the given sign and magnitude, or `None` when
-/// `magnitude` exceeds [`MAX_SAFE_MAGNITUDE`] and so has no safe-integer
-/// encoding.
-pub(crate) fn safe_integer_double(negative: bool, magnitude: u128) -> Option<f64> {
-    if magnitude > MAX_SAFE_MAGNITUDE {
+/// `magnitude` exceeds [`MAX_EXACT_INTEGER_MAGNITUDE`] and is refused rather
+/// than encoded.
+pub(crate) fn exact_integer_double(negative: bool, magnitude: u128) -> Option<f64> {
+    if magnitude > MAX_EXACT_INTEGER_MAGNITUDE {
         return None;
     }
     if magnitude == 0 {
         return Some(0.0);
     }
-    // Exact: every magnitude up to MAX_SAFE_MAGNITUDE (2^53) fits the 53-bit
-    // significand.
+    // Exact: every magnitude up to MAX_EXACT_INTEGER_MAGNITUDE (2^53) fits
+    // the 53-bit significand.
     #[allow(clippy::cast_precision_loss)] // reason: exactness proven above.
     let value = magnitude as f64;
     Some(if negative { -value } else { value })
@@ -55,7 +67,7 @@ pub(crate) fn safe_integer_double(negative: bool, magnitude: u128) -> Option<f64
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_integer_double, with_double_text};
+    use super::{exact_integer_double, with_double_text};
     use crate::Error;
 
     fn text(value: f64) -> String {
@@ -86,20 +98,20 @@ mod tests {
     }
 
     #[test]
-    fn safe_integer_double_accepts_only_magnitudes_up_to_two_pow_53() {
+    fn exact_integer_double_accepts_only_magnitudes_up_to_two_pow_53() {
         assert_eq!(
-            safe_integer_double(false, 1 << 53),
+            exact_integer_double(false, 1 << 53),
             Some(9_007_199_254_740_992.0)
         );
-        assert_eq!(safe_integer_double(false, (1 << 53) + 1), None);
+        assert_eq!(exact_integer_double(false, (1 << 53) + 1), None);
         assert_eq!(
-            safe_integer_double(true, (1 << 53) - 1),
+            exact_integer_double(true, (1 << 53) - 1),
             Some(-9_007_199_254_740_991.0)
         );
         // Exact as a double, but past the magnitude bound: refused anyway.
-        assert_eq!(safe_integer_double(false, 1 << 100), None);
-        assert_eq!(safe_integer_double(false, u128::MAX), None);
-        assert_eq!(safe_integer_double(false, u128::from(u64::MAX)), None);
-        assert_eq!(safe_integer_double(false, 0), Some(0.0));
+        assert_eq!(exact_integer_double(false, 1 << 100), None);
+        assert_eq!(exact_integer_double(false, u128::MAX), None);
+        assert_eq!(exact_integer_double(false, u128::from(u64::MAX)), None);
+        assert_eq!(exact_integer_double(false, 0), Some(0.0));
     }
 }

@@ -11,12 +11,16 @@
 //! * Member names are ordered by UTF-16 code unit (RFC 8785 §3.2.3) by the
 //!   encoder itself, so the bytes do not depend on how a map type is backed,
 //!   nor on `serde_json`'s `preserve_order` feature.
-//! * Numbers use ECMAScript `Number::toString` (§3.2.2.3). An integer is
-//!   encoded by its IEEE 754 double value and refused, naming the value, if
-//!   its magnitude exceeds `2^53` (9007199254740992) — the largest integer
-//!   every smaller one, and it, holds exactly as a double. There is no mode
-//!   that accepts a larger integer; an exact integer past that bound travels
-//!   as a decimal string instead.
+//! * Numbers use ECMAScript `Number::toString` (§3.2.2.3). A Rust integer
+//!   type (`i8`..`i128`, `u8`..`u128`) is encoded by its IEEE 754 double value
+//!   and refused, naming the value, if its magnitude exceeds `2^53`
+//!   (9007199254740992) — the largest integer every smaller one, and it,
+//!   holds exactly as a double. There is no mode that accepts a larger
+//!   integer; an exact integer past that bound must travel as a decimal
+//!   string instead. This bound is on the Rust value the encoder receives,
+//!   not on JSON text: a JSON integer literal already too large for `i64`/
+//!   `u64` (e.g. via `serde_json`) is parsed to an `f64` before it ever
+//!   reaches this crate, and is encoded as the plain double it already is.
 //!   An `f32` is widened to the `f64` with the same value, so `0.1_f32`
 //!   encodes as `0.10000000149011612` (serde_json prints `0.1`); encode an
 //!   `f64` when the decimal spelling is what is meant.

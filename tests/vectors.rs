@@ -170,6 +170,29 @@ fn non_finite_numbers_are_refused() {
     }
 }
 
+/// PLAT-1074 SR-001 FND-002: JSON-text integers past the `2^53` magnitude
+/// bound are refused with `IntegerMagnitudeAboveMaximum`, not silently
+/// encoded. These all fit `i64`/`u64`, so they reach the encoder through
+/// `serialize_i64`/`serialize_u64`, not the float path.
+#[test]
+fn json_text_integers_past_the_magnitude_bound_are_refused() {
+    let file = vectors_file();
+    let refused = section(&file, "refused_integers");
+    assert_eq!(refused.len(), 5);
+    for entry in refused {
+        let name = field(entry, "name");
+        let value: Value = serde_json::from_str(field(entry, "text"))
+            .unwrap_or_else(|error| panic!("{name}: vector text is not valid JSON: {error}"));
+        assert!(
+            matches!(
+                to_vec(&value, LIMITS),
+                Err(Error::IntegerMagnitudeAboveMaximum(_))
+            ),
+            "{name}"
+        );
+    }
+}
+
 /// PLAT-987 AC-1, AC-3: typed values, with no `serde_json::Value` anywhere,
 /// give the vector's bytes whatever order the input map iterates in.
 #[test]
