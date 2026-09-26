@@ -95,23 +95,49 @@ fn duplicate_member_names_are_refused() {
     }
 }
 
+/// PLAT-1074: every integer past `2^53` (9007199254740992) in magnitude is
+/// refused, exact double or not — there is no mode that accepts a larger
+/// integer.
 #[test]
-fn integers_without_an_exact_double_are_refused() {
-    assert_eq!(canonical(&9_007_199_254_740_992_u64), "9007199254740992");
-    // Exact as a double, and printed as ECMAScript prints that double.
-    assert_eq!(canonical(&(1_u64 << 63)), "9223372036854776000");
-    assert_eq!(canonical(&(1_u128 << 100)), "1.2676506002282294e+30");
+fn integers_past_two_pow_53_in_magnitude_are_refused() {
+    const MAX_SAFE_MAGNITUDE: u64 = 9_007_199_254_740_992;
+
+    // At the bound, both signs: accepted.
+    assert_eq!(canonical(&MAX_SAFE_MAGNITUDE), "9007199254740992");
+    assert_eq!(
+        canonical(&-(MAX_SAFE_MAGNITUDE as i64)),
+        "-9007199254740992"
+    );
+
+    // One past the bound, both signs: refused, naming the value.
     assert!(matches!(
-        to_vec(&9_007_199_254_740_993_u64, LIMITS),
-        Err(Error::InexactInteger(9_007_199_254_740_993))
+        to_vec(&(MAX_SAFE_MAGNITUDE + 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
     ));
     assert!(matches!(
+        to_vec(&(-(MAX_SAFE_MAGNITUDE as i64) - 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(-9_007_199_254_740_993))
+    ));
+
+    // Exact as a double (a single set bit, far past the bound) but still
+    // refused: exactness alone is no longer enough.
+    assert!(matches!(
+        to_vec(&(1_u128 << 100), LIMITS),
+        Err(Error::UnsignedIntegerMagnitudeAboveMaximum(_))
+    ));
+
+    // i64::MAX and u64::MAX: both far past the bound, both refused.
+    assert!(matches!(
         to_vec(&i64::MAX, LIMITS),
-        Err(Error::InexactInteger(_))
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
+    ));
+    assert!(matches!(
+        to_vec(&u64::MAX, LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
     ));
     assert!(matches!(
         to_vec(&u128::MAX, LIMITS),
-        Err(Error::InexactUnsignedInteger(u128::MAX))
+        Err(Error::UnsignedIntegerMagnitudeAboveMaximum(u128::MAX))
     ));
 }
 

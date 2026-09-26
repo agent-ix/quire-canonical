@@ -8,13 +8,18 @@
 //! `-0` versus `0`. `ryu-js` implements the ECMAScript algorithm.
 //!
 //! Every RFC 8785 number is an IEEE 754 double, so integers are encoded by
-//! their double value. An integer the double cannot hold exactly is refused,
-//! because rounding it would silently change the value being identified.
+//! their double value. Every integer of magnitude up to [`MAX_SAFE_MAGNITUDE`]
+//! holds exactly in a double; past it, encoding would either round silently or
+//! (for the exact few that happen to land on a representable double, such as
+//! `2^60`) split identical semantic values across different bit patterns
+//! depending on incidental trailing zeros. So the encoder refuses every
+//! integer past the bound, exact or not, naming the value.
 
 use crate::Error;
 
-/// `2^53`: every integer with a smaller odd part is exactly a double.
-const DOUBLE_SIGNIFICAND_LIMIT: u128 = 1 << 53;
+/// `2^53`: the largest integer magnitude that is exactly a double, and the
+/// bound past which every integer is refused rather than encoded.
+pub(crate) const MAX_SAFE_MAGNITUDE: u128 = 1 << 53;
 
 /// ECMAScript text for a finite double. Both zeros print as `0`.
 pub(crate) fn with_double_text<R>(
@@ -31,21 +36,18 @@ pub(crate) fn with_double_text<R>(
     write(buffer.format_finite(value).as_bytes())
 }
 
-/// The double equal to an integer of the given sign and magnitude, if one
-/// exists.
-///
-/// An integer is exactly a double when its odd part (the magnitude with its
-/// trailing zero bits removed) fits the 53-bit significand; the exponent range
-/// covers every `u128`.
-pub(crate) fn exact_double(negative: bool, magnitude: u128) -> Option<f64> {
+/// The double for an integer of the given sign and magnitude, or `None` when
+/// `magnitude` exceeds [`MAX_SAFE_MAGNITUDE`] and so has no safe-integer
+/// encoding.
+pub(crate) fn safe_integer_double(negative: bool, magnitude: u128) -> Option<f64> {
+    if magnitude > MAX_SAFE_MAGNITUDE {
+        return None;
+    }
     if magnitude == 0 {
         return Some(0.0);
     }
-    let odd_part = magnitude >> magnitude.trailing_zeros();
-    if odd_part >= DOUBLE_SIGNIFICAND_LIMIT {
-        return None;
-    }
-    // Exact: the odd-part check above proves the double holds this integer.
+    // Exact: every magnitude up to MAX_SAFE_MAGNITUDE (2^53) fits the 53-bit
+    // significand.
     #[allow(clippy::cast_precision_loss)] // reason: exactness proven above.
     let value = magnitude as f64;
     Some(if negative { -value } else { value })
@@ -53,7 +55,7 @@ pub(crate) fn exact_double(negative: bool, magnitude: u128) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exact_double, with_double_text};
+    use super::{safe_integer_double, with_double_text};
     use crate::Error;
 
     fn text(value: f64) -> String {
@@ -84,17 +86,20 @@ mod tests {
     }
 
     #[test]
-    fn exact_double_accepts_only_representable_integers() {
-        assert_eq!(exact_double(false, 1 << 53), Some(9_007_199_254_740_992.0));
-        assert_eq!(exact_double(false, (1 << 53) + 1), None);
+    fn safe_integer_double_accepts_only_magnitudes_up_to_two_pow_53() {
         assert_eq!(
-            exact_double(true, (1 << 53) - 1),
+            safe_integer_double(false, 1 << 53),
+            Some(9_007_199_254_740_992.0)
+        );
+        assert_eq!(safe_integer_double(false, (1 << 53) + 1), None);
+        assert_eq!(
+            safe_integer_double(true, (1 << 53) - 1),
             Some(-9_007_199_254_740_991.0)
         );
-        // Large but exact: a single set bit.
-        assert_eq!(exact_double(false, 1 << 100), Some(2.0_f64.powi(100)));
-        assert_eq!(exact_double(false, u128::MAX), None);
-        assert_eq!(exact_double(false, u128::from(u64::MAX)), None);
-        assert_eq!(exact_double(false, 0), Some(0.0));
+        // Exact as a double, but past the magnitude bound: refused anyway.
+        assert_eq!(safe_integer_double(false, 1 << 100), None);
+        assert_eq!(safe_integer_double(false, u128::MAX), None);
+        assert_eq!(safe_integer_double(false, u128::from(u64::MAX)), None);
+        assert_eq!(safe_integer_double(false, 0), Some(0.0));
     }
 }
