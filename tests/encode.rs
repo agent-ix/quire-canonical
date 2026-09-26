@@ -11,6 +11,7 @@ use quire_canonical::{
 };
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::Serialize;
+use serde_json::Value;
 
 const LIMITS: Limits = match Limits::new(1 << 16, 32) {
     Ok(limits) => limits,
@@ -95,24 +96,148 @@ fn duplicate_member_names_are_refused() {
     }
 }
 
+/// PLAT-1074: every integer past `2^53` (9007199254740992) in magnitude is
+/// refused, exact double or not — there is no mode that accepts a larger
+/// integer.
 #[test]
-fn integers_without_an_exact_double_are_refused() {
-    assert_eq!(canonical(&9_007_199_254_740_992_u64), "9007199254740992");
-    // Exact as a double, and printed as ECMAScript prints that double.
-    assert_eq!(canonical(&(1_u64 << 63)), "9223372036854776000");
-    assert_eq!(canonical(&(1_u128 << 100)), "1.2676506002282294e+30");
+fn integers_past_two_pow_53_in_magnitude_are_refused() {
+    const MAX_EXACT_MAGNITUDE: u64 = 9_007_199_254_740_992;
+
+    // At the bound, both signs: accepted.
+    assert_eq!(canonical(&MAX_EXACT_MAGNITUDE), "9007199254740992");
+    assert_eq!(
+        canonical(&-(MAX_EXACT_MAGNITUDE as i64)),
+        "-9007199254740992"
+    );
+
+    // One past the bound, both signs: refused, naming the value.
     assert!(matches!(
-        to_vec(&9_007_199_254_740_993_u64, LIMITS),
-        Err(Error::InexactInteger(9_007_199_254_740_993))
+        to_vec(&(MAX_EXACT_MAGNITUDE + 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
     ));
     assert!(matches!(
+        to_vec(&(-(MAX_EXACT_MAGNITUDE as i64) - 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(-9_007_199_254_740_993))
+    ));
+
+    // Exact as a double (a single set bit, far past the bound) but still
+    // refused: exactness alone is no longer enough.
+    assert!(matches!(
+        to_vec(&(1_u128 << 100), LIMITS),
+        Err(Error::UnsignedIntegerMagnitudeAboveMaximum(_))
+    ));
+
+    // i64::MAX and u64::MAX: both far past the bound, both refused.
+    assert!(matches!(
         to_vec(&i64::MAX, LIMITS),
-        Err(Error::InexactInteger(_))
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
+    ));
+    assert!(matches!(
+        to_vec(&u64::MAX, LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
     ));
     assert!(matches!(
         to_vec(&u128::MAX, LIMITS),
-        Err(Error::InexactUnsignedInteger(u128::MAX))
+        Err(Error::UnsignedIntegerMagnitudeAboveMaximum(u128::MAX))
     ));
+
+    // PLAT-1074 SR-002 FND-001: serialize_i128 specifically, at the bound
+    // (both signs, accepted) and past it (both signs, refused). If
+    // serialize_i128 ever bypassed the check (e.g. `self.double(value as
+    // f64)`), `-(1_i128 << 60)` would silently encode instead of refusing.
+    let at_bound_positive: i128 = 1_i128 << 53;
+    let at_bound_negative: i128 = -(1_i128 << 53);
+    assert_eq!(canonical(&at_bound_positive), "9007199254740992");
+    assert_eq!(canonical(&at_bound_negative), "-9007199254740992");
+    assert!(matches!(
+        to_vec(&(-(1_i128 << 60)), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(value)) if value == -(1_i128 << 60)
+    ));
+    assert!(matches!(
+        to_vec(&i128::MIN, LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(i128::MIN))
+    ));
+}
+
+/// PLAT-1074: `serde_json::Number` reaches the encoder through whichever of
+/// `serialize_i64`, `serialize_u64` or `serialize_f64` its internal
+/// representation picks (`N::NegInt`, `N::PosInt`, `N::Float`); every path
+/// enforces the same `2^53` magnitude bound.
+#[test]
+fn serde_json_number_paths_all_enforce_the_magnitude_bound() {
+    use serde_json::json;
+
+    const MAX_EXACT_MAGNITUDE: u64 = 9_007_199_254_740_992;
+
+    // serialize_u64 path (serde_json::Number::PosInt), at and past the bound.
+    assert_eq!(canonical(&json!(MAX_EXACT_MAGNITUDE)), "9007199254740992");
+    assert!(matches!(
+        to_vec(&json!(MAX_EXACT_MAGNITUDE + 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
+    ));
+    assert!(matches!(
+        to_vec(&json!(u64::MAX), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
+    ));
+
+    // serialize_i64 path (serde_json::Number::NegInt), at and past the bound.
+    assert_eq!(
+        canonical(&json!(-(MAX_EXACT_MAGNITUDE as i64))),
+        "-9007199254740992"
+    );
+    assert!(matches!(
+        to_vec(&json!(-(MAX_EXACT_MAGNITUDE as i64) - 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(-9_007_199_254_740_993))
+    ));
+    assert!(matches!(
+        to_vec(&json!(i64::MIN), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
+    ));
+
+    // serialize_f64 path (serde_json::Number::Float): unaffected, still a
+    // plain double, whatever its magnitude.
+    assert_eq!(canonical(&json!(1.5)), "1.5");
+    assert_eq!(canonical(&json!(1e300)), "1e+300");
+
+    // The same values parsed from JSON text, still within u64/i64 range, take
+    // the identical serialize_u64/serialize_i64 path as the `json!` macro
+    // above, so the same bound applies.
+    let parsed: Value = serde_json::from_str("9007199254740992").expect("valid JSON");
+    assert_eq!(canonical(&parsed), "9007199254740992");
+    let parsed: Value = serde_json::from_str("9007199254740993").expect("valid JSON");
+    assert!(matches!(
+        to_vec(&parsed, LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
+    ));
+}
+
+/// PLAT-1074 SR-001 FND-001: a JSON-text integer literal already too large
+/// for `u64`/`i64` is not one of the Rust integer types the magnitude bound
+/// applies to. `serde_json` itself parses it straight to an `f64`
+/// (`serde_json::Number::Float`) before this crate ever sees it, so it
+/// reaches the encoder as a plain double and is encoded as one — silently
+/// rounded to the nearest double, exactly like any other out-of-range float,
+/// and never refused. This is deliberate, not a gap: RFC 8785 has no
+/// exact-integer mode, and refusing every integral double past `2^53` would
+/// also refuse `1e+21`, which RFC 8785 explicitly allows.
+#[test]
+fn json_text_integers_beyond_u64_take_the_float_path_and_are_not_refused() {
+    // One past u64::MAX (18446744073709551615): still parses as a float, not
+    // a refusal, and rounds to the nearest double.
+    let parsed: Value =
+        serde_json::from_str("18446744073709551617").expect("valid JSON, parses as f64");
+    assert_eq!(canonical(&parsed), "18446744073709552000");
+
+    // One past i64::MIN's magnitude on the negative side: the same.
+    let parsed: Value =
+        serde_json::from_str("-9223372036854775809").expect("valid JSON, parses as f64");
+    assert_eq!(canonical(&parsed), "-9223372036854776000");
+
+    // A round number whose nearest double happens to print without rounding
+    // noise: still accepted, still a float.
+    let parsed: Value =
+        serde_json::from_str("100000000000000000001").expect("valid JSON, parses as f64");
+    assert_eq!(canonical(&parsed), "100000000000000000000");
 }
 
 /// What `serde_json::Number` looks like on the wire under

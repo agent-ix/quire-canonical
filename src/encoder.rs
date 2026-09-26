@@ -42,7 +42,7 @@ use std::fmt;
 use serde::ser::{self, Impossible, Serialize};
 
 use crate::escape::escape_fragment;
-use crate::number::{exact_double, with_double_text};
+use crate::number::{exact_integer_double, with_double_text};
 use crate::order::{cmp_member_names, Unescaped};
 use crate::sink::try_extend;
 use crate::{Error, LimitExceeded, LimitKind, Limits, ProtocolViolation, Sink};
@@ -154,8 +154,8 @@ impl<'s, S: Sink + ?Sized> Encoder<'s, S> {
     }
 
     fn integer(&mut self, value: i128) -> Result<(), Error> {
-        let double =
-            exact_double(value < 0, value.unsigned_abs()).ok_or(Error::InexactInteger(value))?;
+        let double = exact_integer_double(value < 0, value.unsigned_abs())
+            .ok_or(Error::IntegerMagnitudeAboveMaximum(value))?;
         self.double(double)
     }
 
@@ -408,7 +408,8 @@ impl<'e, 's, S: Sink + ?Sized> ser::Serializer for &'e mut Encoder<'s, S> {
     }
 
     fn serialize_u128(self, value: u128) -> Result<(), Error> {
-        let double = exact_double(false, value).ok_or(Error::InexactUnsignedInteger(value))?;
+        let double = exact_integer_double(false, value)
+            .ok_or(Error::UnsignedIntegerMagnitudeAboveMaximum(value))?;
         self.double(double)
     }
 

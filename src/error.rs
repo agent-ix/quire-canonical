@@ -102,13 +102,16 @@ pub enum Error {
     /// either.
     #[error("non-finite number {0} has no RFC 8785 representation")]
     NonFiniteNumber(f64),
-    /// An integer with no exact IEEE 754 double. RFC 8785 numbers are doubles,
-    /// and rounding the integer would change the value being identified.
-    #[error("integer {0} is not exactly representable as an IEEE 754 double")]
-    InexactInteger(i128),
-    /// An unsigned integer above `i128::MAX` with no exact IEEE 754 double.
-    #[error("integer {0} is not exactly representable as an IEEE 754 double")]
-    InexactUnsignedInteger(u128),
+    /// A signed integer whose magnitude exceeds `2^53` (9007199254740992):
+    /// the bound past which the encoder refuses every integer, exact double
+    /// or not. There is no mode that accepts a larger integer; an exact
+    /// integer past this bound must travel as a decimal string instead.
+    #[error("integer {0} exceeds the maximum integer magnitude of 2^53 (9007199254740992)")]
+    IntegerMagnitudeAboveMaximum(i128),
+    /// An unsigned integer above `i128::MAX` whose magnitude exceeds the same
+    /// `2^53` bound.
+    #[error("integer {0} exceeds the maximum integer magnitude of 2^53 (9007199254740992)")]
+    UnsignedIntegerMagnitudeAboveMaximum(u128),
     /// An object member name that is not a string.
     #[error("object member name must be a string, found {found}")]
     NonStringMemberName {
