@@ -408,8 +408,8 @@ impl<'e, 's, S: Sink + ?Sized> ser::Serializer for &'e mut Encoder<'s, S> {
     }
 
     fn serialize_u128(self, value: u128) -> Result<(), Error> {
-        let double =
-            safe_integer_double(false, value).ok_or(Error::UnsignedIntegerMagnitudeAboveMaximum(value))?;
+        let double = safe_integer_double(false, value)
+            .ok_or(Error::UnsignedIntegerMagnitudeAboveMaximum(value))?;
         self.double(double)
     }
 

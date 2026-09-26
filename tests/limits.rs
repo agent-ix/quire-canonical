@@ -162,6 +162,23 @@ fn depth_above_the_maximum_is_refused() {
     assert!(Limits::new(1024, u32::MAX).is_err());
 }
 
+/// PLAT-1074: `MAX_DEPTH` is 576; 576 levels canonicalize and 577 refuses
+/// with the existing nesting-depth error.
+#[test]
+fn max_depth_576_encodes_and_577_refuses() {
+    assert_eq!(Limits::MAX_DEPTH, 576);
+    let bound_limits = limits(u64::MAX, Limits::MAX_DEPTH);
+    assert!(to_vec(&Nest(576), bound_limits).is_ok());
+    match to_vec(&Nest(577), bound_limits) {
+        Err(Error::Limit(LimitExceeded {
+            kind: LimitKind::NestingDepth,
+            bound: 576,
+            required: 577,
+        })) => {}
+        other => panic!("expected depth refusal at 577, got {other:?}"),
+    }
+}
+
 /// Objects nested `levels` deep, each through a `serde_json::Value`-like
 /// map path (map, key, value) to use the deepest serde recursion.
 struct NestObject(u32);

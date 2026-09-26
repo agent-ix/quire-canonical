@@ -11,6 +11,7 @@ use quire_canonical::{
 };
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::Serialize;
+use serde_json::Value;
 
 const LIMITS: Limits = match Limits::new(1 << 16, 32) {
     Ok(limits) => limits,
@@ -138,6 +139,57 @@ fn integers_past_two_pow_53_in_magnitude_are_refused() {
     assert!(matches!(
         to_vec(&u128::MAX, LIMITS),
         Err(Error::UnsignedIntegerMagnitudeAboveMaximum(u128::MAX))
+    ));
+}
+
+/// PLAT-1074: `serde_json::Number` reaches the encoder through whichever of
+/// `serialize_i64`, `serialize_u64` or `serialize_f64` its internal
+/// representation picks (`N::NegInt`, `N::PosInt`, `N::Float`); every path
+/// enforces the same `2^53` magnitude bound.
+#[test]
+fn serde_json_number_paths_all_enforce_the_magnitude_bound() {
+    use serde_json::json;
+
+    const MAX_SAFE_MAGNITUDE: u64 = 9_007_199_254_740_992;
+
+    // serialize_u64 path (serde_json::Number::PosInt), at and past the bound.
+    assert_eq!(canonical(&json!(MAX_SAFE_MAGNITUDE)), "9007199254740992");
+    assert!(matches!(
+        to_vec(&json!(MAX_SAFE_MAGNITUDE + 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
+    ));
+    assert!(matches!(
+        to_vec(&json!(u64::MAX), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
+    ));
+
+    // serialize_i64 path (serde_json::Number::NegInt), at and past the bound.
+    assert_eq!(
+        canonical(&json!(-(MAX_SAFE_MAGNITUDE as i64))),
+        "-9007199254740992"
+    );
+    assert!(matches!(
+        to_vec(&json!(-(MAX_SAFE_MAGNITUDE as i64) - 1), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(-9_007_199_254_740_993))
+    ));
+    assert!(matches!(
+        to_vec(&json!(i64::MIN), LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(_))
+    ));
+
+    // serialize_f64 path (serde_json::Number::Float): unaffected, still a
+    // plain double, whatever its magnitude.
+    assert_eq!(canonical(&json!(1.5)), "1.5");
+    assert_eq!(canonical(&json!(1e300)), "1e+300");
+
+    // The same values parsed from JSON text, not built with the `json!` macro,
+    // take the identical `serde_json::Number` path.
+    let parsed: Value = serde_json::from_str("9007199254740992").expect("valid JSON");
+    assert_eq!(canonical(&parsed), "9007199254740992");
+    let parsed: Value = serde_json::from_str("9007199254740993").expect("valid JSON");
+    assert!(matches!(
+        to_vec(&parsed, LIMITS),
+        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
     ));
 }
 
