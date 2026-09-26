@@ -39,3 +39,15 @@ JSON-text-beyond-`u64` behaviour is recorded as SR-001 FND-001.
 | ID | Severity | Summary | Refs |
 |---|---|---|---|
 | FND-001 | medium | No test drives `serialize_i128` past the bound. Mutating it to `self.double(value as f64)` leaves the whole suite green (measured, `--no-fail-fast`), so a later refactor of the i128 arm could silently round `i128` values such as `-(1_i128 << 100)` or `i128::MIN`. The ticket names i128 explicitly. Add `to_vec(&(-(1_i128 << 60)), ..)` and `to_vec(&i128::MIN, ..)` asserting `IntegerMagnitudeAboveMaximum(value)`, plus `±(1_i128 << 53)` accepted. | src/encoder.rs:390, tests/encode.rs:102 |
+
+## Dispositions
+
+Disposition pass at `agent-ix/quire-canonical@2c135ece7f1ceee7f98c7cf95393c25cbd92e3eb`
+(fix commit `2c135ec`). Re-measured: mutating `serialize_i128` to
+`self.double(value as f64)` now fails `integers_past_two_pow_53_in_magnitude_are_refused`
+at `tests/encode.rs:152`. The AC-2 "integers in JSON text beyond `u64`" row is
+now documented and pinned (SR-001 FND-001 disposition).
+
+| FND | Outcome | sha/reason |
+|---|---|---|
+| FND-001 | fixed | 2c135ec — `tests/encode.rs:144` adds i128 cases: `±(1_i128 << 53)` accepted, `-(1_i128 << 60)` and `i128::MIN` refused with `IntegerMagnitudeAboveMaximum(value)`; i128 bypass mutant killed. |

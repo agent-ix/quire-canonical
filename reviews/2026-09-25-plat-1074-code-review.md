@@ -83,3 +83,19 @@ Rust only (`Cargo.toml`, `src/*.rs`, `tests/*.rs`) plus one JSON fixture;
 `/// PLAT-NNN:` doc-comment tracing style. No new `#[allow]` without a reason;
 the one kept `clippy::cast_precision_loss` allow carries its reason. No
 `unsafe`, no panics on the library path, no CI workflow change in the diff.
+
+## Dispositions
+
+Disposition pass at `agent-ix/quire-canonical@2c135ece7f1ceee7f98c7cf95393c25cbd92e3eb`
+(fix commit `2c135ec`, the only commit after `e7353e2`). Each outcome was
+re-checked against the code, not taken from the commit message. `make ci` at
+`2c135ec`: exit 0 (reviewer log `rv-canonical-2b-ci.log`). The new `integers`
+digest `ffab7194a2b81133c50a3fd11587099b5c88d93df98ef5fe46799dd9f3badf0d`
+reproduces from `node` `JSON.stringify` + `sha256sum`. Removing the bound check
+now also fails `tests/vectors.rs:186` (the new `refused_integers` gate).
+
+| FND | Outcome | sha/reason |
+|---|---|---|
+| FND-001 | fixed | 2c135ec — boundary documented in `src/lib.rs:14` and `src/number.rs:18`; behaviour pinned by `json_text_integers_beyond_u64_take_the_float_path_and_are_not_refused` (`tests/encode.rs:223`); `1e21` removed from the `integers` vector (already covered by the `floats` vector and `exponent-threshold-1e21`). JSON text beyond `u64` still rounds by design; that is now stated, not hidden. |
+| FND-002 | fixed | 2c135ec — `refused_integers` section (5 entries) in `tests/vectors/jcs-vectors.json:123`, asserted to `IntegerMagnitudeAboveMaximum` by `tests/vectors.rs:178`; goes red when the bound check is removed. |
+| FND-003 | fixed | 2c135ec — `MAX_SAFE_MAGNITUDE` → `MAX_EXACT_INTEGER_MAGNITUDE`, `safe_integer_double` → `exact_integer_double`; doc now states "every smaller magnitude, and this one, holds exactly" (true: 2^53+1 is the first non-exact integer) and names the ES `MAX_SAFE_INTEGER` = 2^53 − 1 difference; `error.rs` doc rewritten and message says "maximum integer magnitude". |
