@@ -2,6 +2,16 @@
 
 Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes.
 
+## Hash / digest / pin antipattern: present, slated for removal
+
+This repository still contains hashes, digests, SHAs, pins, checksum catalogs and
+records that track files, versions or tools. That is an antipattern and it is slated
+for removal. Do not introduce any new use of it. When you touch code or specs that
+contain one, remove it as part of the change. The only hash that stays is a canonical
+identity digest that binds a proof to the exact content it proved. Package versions
+live in Cargo.toml / package.json and their lockfiles only; reports name the app
+version they ran.
+
 ## Commands
 
 ```bash
@@ -18,13 +28,9 @@ make ci             # fmt-check + lint + test + deny + audit-unsafe + docs
 
 ## Safety scaffolding
 
-Backported from `agent-ix/ecaz`:
-
-- `clippy.toml` pins MSRV to `1.80` and caps cognitive complexity / arg count
 - `deny.toml` allow-lists licenses and denies unknown registries/git sources
 - `scripts/check_unsafe_comments.sh` runs in CI and locally via `make audit-unsafe`. Every `unsafe {` block must have a `// SAFETY:` comment within the 3 preceding lines, or be listed in `scripts/unsafe_comment_baseline.txt`. Update the baseline with `bash scripts/check_unsafe_comments.sh --update-baseline`.
 - `rustfmt.toml` uses 100-char width (stable options only). CI fails on drift.
-- `rust-toolchain.toml` pins to stable + rustfmt + clippy.
 
 ## Layout
 
