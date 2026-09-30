@@ -58,16 +58,21 @@
 mod encoder;
 mod error;
 mod escape;
+mod identity;
 mod number;
 mod order;
 mod sink;
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 pub use crate::error::{DepthAboveMaximum, Error, LimitExceeded, LimitKind, ProtocolViolation};
+pub use crate::identity::{
+    AuthorityDigest, AuthorityIdentity, AuthorityQualifiedSubjectReference, DigestDomain,
+    IdentityError, ObjectIdentity, Revision, SemanticComparisonRefusal, SubjectKind,
+};
 pub use crate::sink::{Sink, WriteSink};
 
 /// The explicit bounds every encoding runs under.
@@ -123,7 +128,7 @@ impl Limits {
 }
 
 /// A SHA-256 digest of canonical bytes.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Sha256Digest([u8; 32]);
 
 impl Sha256Digest {
