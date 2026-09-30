@@ -1,6 +1,6 @@
 [package]
 name = "quire-canonical"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes."
@@ -22,7 +22,7 @@ test-preserve-order = ["dep:serde_json", "serde_json/preserve_order"]
 
 [dependencies]
 ryu-js = "1"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
 # Only present under `test-preserve-order`; never used by the library itself.

@@ -1,0 +1,100 @@
+name: Release
+
+# Cuts a `quire-canonical-vX.Y.Z` git tag after this repo's own test+lint gate
+# passes at the requested version. Modeled on filament-core-data's
+# `schema-release.yml` pattern, adapted for this repo:
+#
+# - `publish = false` stays in Cargo.toml. This crate is not published to
+#   crates.io; a git tag is the release artifact, the same way FCD's workflow
+#   treats its tag as "the record, not the trigger" for a publish step. There
+#   is no `cargo publish` job here because there is nothing to publish to.
+# - The tag is package-prefixed (`quire-canonical-vX.Y.Z`), matching FCD's
+#   `semantic-schema-v0.1.0` naming and for the same reason FCD documents: a
+#   bare `vX.Y.Z` tag cannot say which package moved once a second
+#   independently versioned package exists in this repo.
+# - Dispatch only, like this repo's `ci.yml`. A tag does not run CI or publish
+#   anything by pushing it; cutting the tag is this workflow's own explicit
+#   last step, run only on a human request.
+# - Idempotent the same way FCD's publish step is: if the target tag already
+#   exists, this succeeds as a no-op (echoes and exits 0) rather than failing.
+#   A second dispatch at a version already released is not an error.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.3.0, no leading v)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    name: Rust Checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Test (preserve_order lane)
+        run: cargo test --features test-preserve-order
+
+      - name: Unsafe audit
+        run: bash scripts/check_unsafe_comments.sh
+
+      - name: Docs
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
+  tag:
+    name: Cut release tag
+    runs-on: ubuntu-24.04
+    needs: gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify Cargo.toml version matches the requested version
+        run: |
+          set -e
+          CARGO_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [[ "$CARGO_VERSION" != "${{ inputs.version }}" ]]; then
+            echo "::error::Cargo.toml version ($CARGO_VERSION) does not match requested version (${{ inputs.version }})"
+            exit 1
+          fi
+
+      - name: Tag, or no-op if already tagged
+        run: |
+          set -e
+          TAG="quire-canonical-v${{ inputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            echo "Already tagged: $TAG"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Write summary
+        run: |
+          {
+            echo "### Tagged"
+            echo "- Tag: \`quire-canonical-v${{ inputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
