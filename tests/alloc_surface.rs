@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
 //! The `no_std` + `alloc` surface: encoding into an in-memory buffer and
-//! minting a SHA-256 identity, with nothing from `std`.
+//! minting a SHA-256 identity.
 //!
-//! `make test-no-std` runs the suite with `--no-default-features`, so this
-//! file then exercises the crate built without its `std` feature. The
-//! expected digest was computed by `sha256sum` over the canonical text, not by
-//! this crate.
+//! `make test-no-std` runs the suite on the host with `--no-default-features`,
+//! so this file exercises the crate's std-off code paths (no `WriteSink`, no
+//! `Error::Sink`). It does not prove that nothing from `std` is linked: the
+//! test harness links `std`, and the dev-dependencies turn on `serde/std` in
+//! the library. That proof is `make build-no-std`, which builds the library
+//! for `thumbv7em-none-eabi`, a target with no `std`. The expected digest was
+//! computed by `sha256sum` over the canonical text, not by this crate.
 
 use quire_canonical::{encode, sha256, to_vec, Limits, Sink};
 use serde::Serialize;
