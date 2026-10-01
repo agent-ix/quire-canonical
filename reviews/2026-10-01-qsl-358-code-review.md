@@ -100,3 +100,11 @@ files' `std::` imports inside `#[cfg(test)]` are covered by
 `#[cfg(any(feature = "std", test))] extern crate std`. The hard-coded SHA-256 in
 `alloc_surface.rs` is a behaviour assertion on the crate's identity-digest
 feature, computed independently. It is not a file or version pin.
+
+## Dispositions
+
+Round 1, reviewed at `3d5961a59bc4a8baefaf63d793f9d579bcea68b0`.
+
+| FND | Outcome | sha/reason |
+| --- | --- | --- |
+| FND-001 | fixed | 3d5961a. The `tests/alloc_surface.rs` header now says the host `--no-default-features` lane exercises only the std-off code paths. It says the harness links `std` and the dev-deps turn on `serde/std`, and names `make build-no-std` (thumbv7em-none-eabi) as the proof that nothing from `std` is linked. The change is doc-only: the alloc_surface tests pass under `--no-default-features` and `cargo fmt --check` is clean. |
