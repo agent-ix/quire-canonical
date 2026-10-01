@@ -57,6 +57,9 @@ pub(crate) fn escape_fragment(
 
 #[cfg(test)]
 mod tests {
+    use std::string::String;
+    use std::vec::Vec;
+
     use super::escape_fragment;
 
     fn escaped(text: &str) -> String {

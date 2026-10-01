@@ -67,6 +67,9 @@ pub(crate) fn exact_integer_double(negative: bool, magnitude: u128) -> Option<f6
 
 #[cfg(test)]
 mod tests {
+    use std::format;
+    use std::string::String;
+
     use super::{exact_integer_double, with_double_text};
     use crate::Error;
 

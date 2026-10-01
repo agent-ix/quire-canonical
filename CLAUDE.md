@@ -18,12 +18,13 @@ version they ran.
 make fmt            # format with rustfmt
 make fmt-check      # verify formatting (CI gate)
 make lint           # clippy with -D warnings
-make test           # cargo test, twice: default and serde_json/preserve_order lanes
+make test           # cargo test: default, serde_json/preserve_order and --no-default-features lanes
+make build-no-std   # build without std for thumbv7em-none-eabi (proves no_std + alloc)
 make build          # release build
 make clean          # cargo clean
 make deny           # cargo deny check (advisories, bans, licenses, sources)
 make audit-unsafe   # check that every unsafe block has a // SAFETY: comment
-make ci             # fmt-check + lint + test + deny + audit-unsafe + docs
+make ci             # fmt-check + lint + test + build-no-std + deny + audit-unsafe + docs
 ```
 
 ## Safety scaffolding

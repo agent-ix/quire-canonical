@@ -28,7 +28,9 @@
 //! distinctness of every non-identical label) that FR-201 and FR-287 require
 //! of *any* domain label.
 
-use std::fmt;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 

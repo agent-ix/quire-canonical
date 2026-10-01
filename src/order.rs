@@ -17,7 +17,7 @@
 //! that gap — `0xEE`/`0xEF` start `U+E000..=U+FFFF`, `0xF0..=0xF4` start the
 //! supplementary planes — and those two cases are inverted.
 
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 /// The unescaped UTF-8 bytes of a canonical JSON string, read from just after
 /// its opening quote up to its closing quote.
@@ -56,7 +56,7 @@ impl Iterator for Unescaped<'_> {
                     b'u' => {
                         let digits = self.bytes.get(self.index..self.index + 4)?;
                         self.index += 4;
-                        let text = std::str::from_utf8(digits).ok()?;
+                        let text = core::str::from_utf8(digits).ok()?;
                         // The escaper emits `\u00xx` only for C0 controls.
                         u8::from_str_radix(text.get(2..)?, 16).ok()?
                     }
@@ -101,6 +101,12 @@ fn utf16_order_of_first_difference(left: u8, right: u8) -> Ordering {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::ToOwned as _;
+    use std::format;
+    use std::string::String;
+    use std::vec;
+    use std::vec::Vec;
+
     use super::{cmp_member_names, Unescaped};
     use crate::escape::escape_fragment;
 
@@ -173,7 +179,7 @@ mod tests {
 
     #[test]
     fn supplementary_plane_sorts_before_high_bmp() {
-        use std::cmp::Ordering;
+        use core::cmp::Ordering;
         assert_eq!(
             cmp_member_names(&member("\u{10000}"), &member("\u{FFFD}")),
             Ordering::Less
