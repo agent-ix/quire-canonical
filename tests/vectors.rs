@@ -17,7 +17,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use quire_canonical::{encode, sha256, to_vec, Error, Limits, WriteSink};
+#[cfg(feature = "std")]
+use quire_canonical::WriteSink;
+use quire_canonical::{encode, sha256, to_vec, Error, Limits};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -78,9 +80,12 @@ fn every_vector_encodes_to_its_canonical_bytes_and_digest() {
         assert_eq!(hex(&finalize(both.1)), digest, "{name}: tee digest");
         assert_eq!(length, u64::try_from(canonical.len()).expect("fits"));
 
-        let mut writer = WriteSink(Vec::new());
-        encode(&mut writer, preimage, LIMITS).expect("encodes");
-        assert_eq!(writer.0, canonical, "{name}: io::Write sink");
+        #[cfg(feature = "std")]
+        {
+            let mut writer = WriteSink(Vec::new());
+            encode(&mut writer, preimage, LIMITS).expect("encodes");
+            assert_eq!(writer.0, canonical, "{name}: io::Write sink");
+        }
     }
 }
 

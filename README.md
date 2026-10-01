@@ -17,6 +17,12 @@ let digest = sha256(&value, limits)?;    // hashed while encoding
 UTF-16 code unit by the encoder, so output does not depend on map backing or
 `serde_json` features. A limit refuses the encoding; it never truncates.
 
+The crate is `no_std` + `alloc`. The default `std` feature adds only
+`WriteSink` and `Error::Sink`; with `default-features = false`, encoding into a
+`Vec<u8>` or a hasher, `to_vec`, `sha256` and `sha256_with_domain` all work
+without `std`. `make build-no-std` builds that configuration for
+`thumbv7em-none-eabi`.
+
 Arrays and scalars stream to the sink. Each open object buffers its members'
 canonical bytes until it closes, so it can sort them; a top-level object is
 therefore held whole before the first byte is hashed. The buffered bytes count

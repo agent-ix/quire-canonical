@@ -2,7 +2,7 @@
 name = "quire-canonical"
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.81"
 description = "Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes."
 authors = ["Agent IX <peter@agent-ix.ai>"]
 license = "AGPL-3.0-or-later"
@@ -14,6 +14,11 @@ name = "quire_canonical"
 path = "src/lib.rs"
 
 [features]
+default = ["std"]
+# The `io::Write` adapter (`WriteSink`) and the `Error::Sink` variant that
+# carries an `io::Error`. Without it the crate is `no_std` + `alloc`: encoding
+# into a `Vec<u8>` or a SHA-256 hasher, and digest minting, still work.
+std = ["serde/std", "sha2/std"]
 # Test lane only: turns on `serde_json/preserve_order` so the golden vectors
 # run against an insertion-ordered `serde_json::Map` as well as the default
 # `BTreeMap` one. `make test` runs the suite both ways. The encoder never reads
@@ -22,9 +27,9 @@ test-preserve-order = ["dep:serde_json", "serde_json/preserve_order"]
 
 [dependencies]
 ryu-js = "1"
-serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
-thiserror = "2"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+sha2 = { version = "0.10", default-features = false }
+thiserror = { version = "2", default-features = false }
 # Only present under `test-preserve-order`; never used by the library itself.
 serde_json = { version = "1", optional = true }
 

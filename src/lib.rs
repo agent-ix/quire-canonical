@@ -5,7 +5,7 @@
 //!
 //! Any [`serde::Serialize`] value is encoded to its RFC 8785 canonical text
 //! and fed, in order, to a [`Sink`]: a SHA-256 hasher, a byte vector, an
-//! [`std::io::Write`], or a pair of them. There is no intermediate `String` of
+//! `std::io::Write` (with the `std` feature), or a pair of them. There is no intermediate `String` of
 //! the whole text and no `serde_json::Value`.
 //!
 //! * Member names are ordered by UTF-16 code unit (RFC 8785 §3.2.3) by the
@@ -52,8 +52,13 @@
 //! # Ok::<(), quire_canonical::Error>(())
 //! ```
 
+#![no_std]
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
+#[cfg(any(feature = "std", test))]
+extern crate std;
 
 mod encoder;
 mod error;
@@ -63,7 +68,8 @@ mod number;
 mod order;
 mod sink;
 
-use std::fmt;
+use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -73,7 +79,9 @@ pub use crate::identity::{
     AuthorityDigest, AuthorityIdentity, AuthorityQualifiedSubjectReference, DigestDomain,
     IdentityError, ObjectIdentity, Revision, SemanticComparisonRefusal, SubjectKind,
 };
-pub use crate::sink::{Sink, WriteSink};
+pub use crate::sink::Sink;
+#[cfg(feature = "std")]
+pub use crate::sink::WriteSink;
 
 /// The explicit bounds every encoding runs under.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

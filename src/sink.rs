@@ -8,6 +8,8 @@
 //! members are sorted, so they are buffered first (see the crate docs): a
 //! top-level object reaches the sink only once it is complete.
 
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::io;
 
 use sha2::{Digest as _, Sha256};
@@ -59,9 +61,11 @@ impl<A: Sink, B: Sink> Sink for (A, B) {
 ///
 /// A refused encoding may already have written a prefix of the canonical text
 /// to the writer. That prefix is not canonical output; discard it on `Err`.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct WriteSink<W>(pub W);
 
+#[cfg(feature = "std")]
 impl<W: io::Write> Sink for WriteSink<W> {
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.0.write_all(bytes).map_err(Error::Sink)

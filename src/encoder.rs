@@ -37,7 +37,10 @@
 //! not an abort; the fixed-size frame records and integer map-key text are
 //! ordinary allocations.
 
-use std::fmt;
+use alloc::borrow::ToOwned as _;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 
 use serde::ser::{self, Impossible, Serialize};
 
@@ -284,7 +287,7 @@ fn buffer_offset(buffer: &[u8]) -> Result<u32, Error> {
 
 fn allocation_of<T>(count: usize) -> Error {
     Error::Allocation {
-        requested: std::mem::size_of::<T>().saturating_mul(count),
+        requested: core::mem::size_of::<T>().saturating_mul(count),
     }
 }
 
@@ -714,7 +717,7 @@ impl Default for DecimalText {
 
 impl DecimalText {
     fn as_str(&self) -> Option<&str> {
-        std::str::from_utf8(self.bytes.get(..self.length)?).ok()
+        core::str::from_utf8(self.bytes.get(..self.length)?).ok()
     }
 }
 

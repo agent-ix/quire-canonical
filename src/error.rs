@@ -7,7 +7,8 @@
 //! produced when the complete canonical text was hashed, and a byte vector is
 //! only returned when it holds the complete canonical text.
 
-use std::fmt;
+use alloc::string::{String, ToString as _};
+use core::fmt;
 
 /// Which configured limit an encoding reached.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -56,7 +57,7 @@ impl fmt::Display for LimitExceeded {
     }
 }
 
-impl std::error::Error for LimitExceeded {}
+impl core::error::Error for LimitExceeded {}
 
 /// A [`crate::Limits`] that cannot be honoured.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
@@ -139,6 +140,7 @@ pub enum Error {
         requested: usize,
     },
     /// The byte sink refused a write.
+    #[cfg(feature = "std")]
     #[error("canonical output sink failed: {0}")]
     Sink(#[from] std::io::Error),
     /// The value's `Serialize` implementation called the serializer out of

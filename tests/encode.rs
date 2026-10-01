@@ -4,10 +4,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(feature = "std")]
 use std::io;
 
+#[cfg(feature = "std")]
+use quire_canonical::WriteSink;
 use quire_canonical::{
-    encode, sha256, sha256_with_domain, to_vec, Error, Limits, ProtocolViolation, WriteSink,
+    encode, sha256, sha256_with_domain, to_vec, Error, Limits, ProtocolViolation,
 };
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::Serialize;
@@ -393,8 +396,10 @@ fn well_ordered_key_value_calls_still_encode() {
 }
 
 /// A writer that refuses everything.
+#[cfg(feature = "std")]
 struct Broken;
 
+#[cfg(feature = "std")]
 impl io::Write for Broken {
     fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
         Err(io::Error::other("disk full"))
@@ -405,6 +410,7 @@ impl io::Write for Broken {
     }
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn sink_failure_is_a_refusal() {
     assert!(matches!(
