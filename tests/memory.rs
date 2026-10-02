@@ -67,7 +67,7 @@ fn peak_during(run: impl FnOnce()) -> usize {
 /// per frame plus 8-byte offsets keeps it under 4x.
 #[test]
 fn flat_object_peak_heap_stays_under_four_times_the_output() {
-    let limits = Limits::new(u64::MAX, 8).expect("valid");
+    let limits = Limits::new(u64::MAX);
     let flat: BTreeMap<String, u32> = (0..20_000).map(|index| (format!("{index}"), 1)).collect();
     let nested: BTreeMap<String, BTreeMap<String, u32>> = (0..200)
         .map(|outer| {

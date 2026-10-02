@@ -10,18 +10,33 @@ use std::io;
 #[cfg(feature = "std")]
 use quire_canonical::WriteSink;
 use quire_canonical::{
-    encode, sha256, sha256_with_domain, to_vec, Error, Limits, ProtocolViolation,
+    encode, nest, sha256, sha256_with_domain, to_vec, Error, FixedShape, Limits, ProtocolViolation,
+    Writer,
 };
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::Serialize;
-use serde_json::Value;
 
-const LIMITS: Limits = match Limits::new(1 << 16, 32) {
-    Ok(limits) => limits,
-    Err(_) => panic!("depth within MAX_DEPTH"),
-};
+const LIMITS: Limits = Limits::new(1 << 16);
 
-fn canonical<T: Serialize + ?Sized>(value: &T) -> String {
+/// Implements `FixedShape` for a test type whose JSON nests `$depth` levels.
+macro_rules! fixed_shape {
+    ($($name:ty => $depth:expr),* $(,)?) => {
+        $(impl FixedShape for $name {
+            const DEPTH: usize = $depth;
+        })*
+    };
+}
+
+fixed_shape!(
+    Shape => nest(&[nest(&[u8::DEPTH])]),
+    Duplicated => nest(&[u8::DEPTH]),
+    ArbitraryPrecisionNumber => nest(&[<&str>::DEPTH]),
+    Shown => 0,
+    Driven => nest(&[u8::DEPTH]),
+    Bytes<'_> => nest(&[u8::DEPTH]),
+);
+
+fn canonical<T: FixedShape + ?Sized>(value: &T) -> String {
     String::from_utf8(to_vec(value, LIMITS).expect("encodes")).expect("UTF-8")
 }
 
@@ -162,87 +177,6 @@ fn integers_past_two_pow_53_in_magnitude_are_refused() {
     ));
 }
 
-/// PLAT-1074: `serde_json::Number` reaches the encoder through whichever of
-/// `serialize_i64`, `serialize_u64` or `serialize_f64` its internal
-/// representation picks (`N::NegInt`, `N::PosInt`, `N::Float`); every path
-/// enforces the same `2^53` magnitude bound.
-#[test]
-fn serde_json_number_paths_all_enforce_the_magnitude_bound() {
-    use serde_json::json;
-
-    const MAX_EXACT_MAGNITUDE: u64 = 9_007_199_254_740_992;
-
-    // serialize_u64 path (serde_json::Number::PosInt), at and past the bound.
-    assert_eq!(canonical(&json!(MAX_EXACT_MAGNITUDE)), "9007199254740992");
-    assert!(matches!(
-        to_vec(&json!(MAX_EXACT_MAGNITUDE + 1), LIMITS),
-        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
-    ));
-    assert!(matches!(
-        to_vec(&json!(u64::MAX), LIMITS),
-        Err(Error::IntegerMagnitudeAboveMaximum(_))
-    ));
-
-    // serialize_i64 path (serde_json::Number::NegInt), at and past the bound.
-    assert_eq!(
-        canonical(&json!(-(MAX_EXACT_MAGNITUDE as i64))),
-        "-9007199254740992"
-    );
-    assert!(matches!(
-        to_vec(&json!(-(MAX_EXACT_MAGNITUDE as i64) - 1), LIMITS),
-        Err(Error::IntegerMagnitudeAboveMaximum(-9_007_199_254_740_993))
-    ));
-    assert!(matches!(
-        to_vec(&json!(i64::MIN), LIMITS),
-        Err(Error::IntegerMagnitudeAboveMaximum(_))
-    ));
-
-    // serialize_f64 path (serde_json::Number::Float): unaffected, still a
-    // plain double, whatever its magnitude.
-    assert_eq!(canonical(&json!(1.5)), "1.5");
-    assert_eq!(canonical(&json!(1e300)), "1e+300");
-
-    // The same values parsed from JSON text, still within u64/i64 range, take
-    // the identical serialize_u64/serialize_i64 path as the `json!` macro
-    // above, so the same bound applies.
-    let parsed: Value = serde_json::from_str("9007199254740992").expect("valid JSON");
-    assert_eq!(canonical(&parsed), "9007199254740992");
-    let parsed: Value = serde_json::from_str("9007199254740993").expect("valid JSON");
-    assert!(matches!(
-        to_vec(&parsed, LIMITS),
-        Err(Error::IntegerMagnitudeAboveMaximum(9_007_199_254_740_993))
-    ));
-}
-
-/// PLAT-1074 SR-001 FND-001: a JSON-text integer literal already too large
-/// for `u64`/`i64` is not one of the Rust integer types the magnitude bound
-/// applies to. `serde_json` itself parses it straight to an `f64`
-/// (`serde_json::Number::Float`) before this crate ever sees it, so it
-/// reaches the encoder as a plain double and is encoded as one — silently
-/// rounded to the nearest double, exactly like any other out-of-range float,
-/// and never refused. This is deliberate, not a gap: RFC 8785 has no
-/// exact-integer mode, and refusing every integral double past `2^53` would
-/// also refuse `1e+21`, which RFC 8785 explicitly allows.
-#[test]
-fn json_text_integers_beyond_u64_take_the_float_path_and_are_not_refused() {
-    // One past u64::MAX (18446744073709551615): still parses as a float, not
-    // a refusal, and rounds to the nearest double.
-    let parsed: Value =
-        serde_json::from_str("18446744073709551617").expect("valid JSON, parses as f64");
-    assert_eq!(canonical(&parsed), "18446744073709552000");
-
-    // One past i64::MIN's magnitude on the negative side: the same.
-    let parsed: Value =
-        serde_json::from_str("-9223372036854775809").expect("valid JSON, parses as f64");
-    assert_eq!(canonical(&parsed), "-9223372036854776000");
-
-    // A round number whose nearest double happens to print without rounding
-    // noise: still accepted, still a float.
-    let parsed: Value =
-        serde_json::from_str("100000000000000000001").expect("valid JSON, parses as f64");
-    assert_eq!(canonical(&parsed), "100000000000000000000");
-}
-
 /// What `serde_json::Number` looks like on the wire under
 /// `arbitrary_precision`.
 struct ArbitraryPrecisionNumber;
@@ -284,7 +218,7 @@ impl Serialize for Shown {
 fn collect_str_is_escaped_and_metered() {
     assert_eq!(canonical(&Shown), "\"say \\\"hi\\\"\\n\\u0001\"");
     assert!(matches!(
-        to_vec(&Shown, Limits::new(5, 1).expect("valid")),
+        to_vec(&Shown, Limits::new(5)),
         Err(Error::Limit(_))
     ));
 }
@@ -430,4 +364,99 @@ impl Serialize for Bytes<'_> {
 
 fn serde_bytes_like(bytes: &[u8]) -> Bytes<'_> {
     Bytes(bytes)
+}
+
+/// The event API refuses each out-of-order event, and every event after a
+/// refusal.
+#[test]
+fn event_api_refuses_out_of_order_events() {
+    type Step = fn(&mut Writer<'_, Vec<u8>>) -> Result<(), Error>;
+    let cases: [(&[Step], ProtocolViolation); 8] = [
+        (&[|w| w.name("a")], ProtocolViolation::NameOutsideObject),
+        (
+            &[|w| w.begin_array(), |w| w.end_object()],
+            ProtocolViolation::MismatchedEnd,
+        ),
+        (
+            &[|w| w.begin_object(), |w| w.end_array()],
+            ProtocolViolation::MismatchedEnd,
+        ),
+        (&[|w| w.end_array()], ProtocolViolation::MismatchedEnd),
+        (
+            &[|w| w.null(), |w| w.null()],
+            ProtocolViolation::SecondValue,
+        ),
+        (
+            &[|w| w.begin_object(), |w| w.null()],
+            ProtocolViolation::ValueWithoutName,
+        ),
+        (
+            &[|w| w.begin_object(), |w| w.name("a"), |w| w.name("b")],
+            ProtocolViolation::NameWithoutValue,
+        ),
+        (
+            &[|w| w.begin_object(), |w| w.name("a"), |w| w.end_object()],
+            ProtocolViolation::ObjectEndedAfterName,
+        ),
+    ];
+    for (steps, expected) in cases {
+        let mut sink = Vec::new();
+        let mut writer = Writer::new(&mut sink, LIMITS);
+        let (last, before) = steps.split_last().expect("steps");
+        for step in before {
+            step(&mut writer).expect("in order");
+        }
+        assert!(
+            matches!(last(&mut writer), Err(Error::Protocol(found)) if found == expected),
+            "{expected:?}"
+        );
+        assert!(matches!(
+            writer.null(),
+            Err(Error::Protocol(ProtocolViolation::AfterRefusal))
+        ));
+        assert!(matches!(
+            writer.finish(),
+            Err(Error::Protocol(ProtocolViolation::AfterRefusal))
+        ));
+    }
+}
+
+/// `finish` refuses a writer holding no value or an open container.
+#[test]
+fn event_api_finish_requires_one_complete_value() {
+    let mut sink = Vec::new();
+    assert!(matches!(
+        Writer::new(&mut sink, LIMITS).finish(),
+        Err(Error::Protocol(ProtocolViolation::Incomplete))
+    ));
+    let mut writer = Writer::new(&mut sink, LIMITS);
+    writer.begin_array().expect("open");
+    assert!(matches!(
+        writer.finish(),
+        Err(Error::Protocol(ProtocolViolation::Incomplete))
+    ));
+}
+
+/// A fixed-shape value written into an event stream encodes as it does on
+/// its own, inside a value whose depth the caller drives.
+#[test]
+fn event_api_embeds_fixed_shape_values() {
+    let mut sink = Vec::new();
+    let mut writer = Writer::new(&mut sink, LIMITS);
+    writer.begin_object().expect("open");
+    writer.name("shape").expect("name");
+    writer
+        .serialize(&Shape::Struct {
+            width: 2,
+            height: 3,
+        })
+        .expect("fixed shape");
+    writer.name("a").expect("name");
+    writer.serialize(&[1_u8, 2]).expect("array");
+    writer.end_object().expect("close");
+    writer.finish().expect("complete");
+    assert_eq!(
+        String::from_utf8(sink).expect("UTF-8"),
+        r#"{"a":[1,2],"shape":{"Struct":{"height":3,"width":2}}}"#
+    );
 }
