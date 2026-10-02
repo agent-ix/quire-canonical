@@ -11,22 +11,18 @@
 //! for `thumbv7em-none-eabi`, a target with no `std`. The expected digest was
 //! computed by `sha256sum` over the canonical text, not by this crate.
 
-use quire_canonical::{encode, nest, read, sha256, to_vec, FixedShape, Limits, Sink};
+use quire_canonical::{encode, read, sha256, to_vec, FixedShape, Limits, Sink};
 use serde::Serialize;
 
 const LIMITS: Limits = Limits::new(1 << 10);
 
 /// A preimage shaped like a compound-unit identity record. Fields are declared
 /// out of canonical order so the encoder's member sort is exercised.
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 struct Preimage {
     unit: &'static str,
     b: bool,
     a: (u8, f64, &'static str),
-}
-
-impl FixedShape for Preimage {
-    const DEPTH: usize = nest(&[<&str>::DEPTH, bool::DEPTH, <(u8, f64, &str)>::DEPTH]);
 }
 
 const PREIMAGE: Preimage = Preimage {

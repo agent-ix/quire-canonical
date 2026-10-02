@@ -22,8 +22,12 @@ writer.finish()?;
 Nothing recurses in proportion to its input and nothing bounds depth: only
 byte limits apply. A value reaches the encoder through the `Writer` event API
 (data whose depth follows its input), as a `Document` from the reader, or
-through serde for a `FixedShape` type, whose depth is fixed by its schema; a
-recursive type cannot implement `FixedShape` without a compile-time cycle.
+through serde for a `FixedShape` type, whose depth is fixed by its schema.
+`#[derive(FixedShape)]` computes `DEPTH` from every field's `DEPTH`, so a
+recursive type that derives it is a compile-time cycle (E0391). A hand-written
+impl gets the same check only if its `DEPTH` is `nest` over every field's
+`DEPTH`; a literal `DEPTH` defeats it, and a recursive value can then overflow
+the stack through serde.
 
 `encode` writes into any `Sink` (a `sha2::Sha256`, a `Vec<u8>`, a
 `WriteSink<impl io::Write>`, or a pair of sinks). Member names are sorted by

@@ -16,13 +16,30 @@ use crate::Sha256Digest;
 /// serde's recursive `Serialize` is safe to drive the encoder with.
 ///
 /// [`FixedShape::DEPTH`] is the number of arrays and objects the type's JSON
-/// nests, computed from the `DEPTH` of the types it contains with [`nest`].
-/// It is never a limit: no encoding is refused on depth. Its job is to make a
-/// recursive type fail to compile. A recursive type's `DEPTH` refers, through
-/// its fields, to itself, and the encoder evaluates `DEPTH` at compile time,
-/// so rustc rejects the cycle:
+/// nests. It is never a limit: no encoding is refused on depth. Its job is to
+/// make a recursive type fail to compile, and it does that only when it is
+/// computed from the `DEPTH` of every field's type: then a type that
+/// contains itself refers to its own `DEPTH`, the encoder evaluates `DEPTH`
+/// at compile time, and rustc rejects the cycle (E0391).
 ///
-/// ```compile_fail
+/// Derive it. `#[derive(FixedShape)]` computes `DEPTH` with [`nest`] and
+/// [`deepest`] over every field's `DEPTH`, so a recursive type cannot derive
+/// it:
+///
+/// ```compile_fail,E0391
+/// use quire_canonical::{to_vec, FixedShape, Limits};
+///
+/// #[derive(serde::Serialize, FixedShape)]
+/// struct List { next: Option<Box<List>> }
+///
+/// let _ = to_vec(&List { next: None }, Limits::new(64));
+/// ```
+///
+/// A hand-written impl must follow the same rule: `DEPTH` is `nest` (or
+/// `deepest`, for alternatives) over the `DEPTH` of every field's type.
+/// Written that way, a recursive type is refused the same way:
+///
+/// ```compile_fail,E0391
 /// use quire_canonical::{nest, to_vec, FixedShape, Limits};
 ///
 /// #[derive(serde::Serialize)]
@@ -35,6 +52,13 @@ use crate::Sha256Digest;
 /// let _ = to_vec(&List { next: None }, Limits::new(64));
 /// ```
 ///
+/// A hand-written literal `DEPTH` defeats the check. The compiler cannot
+/// tell that a type with `const DEPTH: usize = 1` contains itself, or holds
+/// a recursive foreign type such as `serde_json::Value`, and such a value
+/// then recurses natively through serde and can overflow the stack. Only
+/// write a literal for a type with no fields to name, such as one with a
+/// hand-written `Serialize` that emits a scalar.
+///
 /// A type whose depth follows its input implements [`crate::Encode`] instead,
 /// pushing [`crate::Writer`] events from an explicit stack.
 pub trait FixedShape: Serialize {
@@ -42,10 +66,10 @@ pub trait FixedShape: Serialize {
     const DEPTH: usize;
 }
 
-/// The `DEPTH` of one array or object around values of the given depths:
-/// one more than the deepest of them.
+/// The deepest of the given depths, or `0` for none: the `DEPTH` of a type
+/// that is one of several alternatives, such as an enum.
 #[must_use]
-pub const fn nest(depths: &[usize]) -> usize {
+pub const fn deepest(depths: &[usize]) -> usize {
     let mut deepest = 0;
     let mut index = 0;
     while index < depths.len() {
@@ -54,7 +78,14 @@ pub const fn nest(depths: &[usize]) -> usize {
         }
         index += 1;
     }
-    deepest.saturating_add(1)
+    deepest
+}
+
+/// The `DEPTH` of one array or object around values of the given depths:
+/// one more than the deepest of them.
+#[must_use]
+pub const fn nest(depths: &[usize]) -> usize {
+    deepest(depths).saturating_add(1)
 }
 
 macro_rules! scalar_shapes {

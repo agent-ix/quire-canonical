@@ -23,8 +23,11 @@
 //!   the [`Writer`] from an explicit heap stack.
 //! * A [`FixedShape`] type encodes through its serde `Serialize`. serde
 //!   recurses once per nesting level, so only types whose depth is fixed by
-//!   their schema may take this path; a recursive type's [`FixedShape::DEPTH`]
-//!   refers to itself, and rustc refuses the cycle at compile time.
+//!   their schema may take this path. `#[derive(FixedShape)]` computes
+//!   [`FixedShape::DEPTH`] from every field's `DEPTH`, so a recursive type
+//!   refers to its own `DEPTH` and rustc refuses the cycle at compile time.
+//!   A hand-written impl gets that check only if it computes `DEPTH` the same
+//!   way; a literal `DEPTH` defeats it (see [`FixedShape`]).
 //!
 //! [`encode`], [`to_vec`], [`sha256`] and [`sha256_with_domain`] accept any
 //! [`Encode`] value: a [`FixedShape`] type, a [`Document`] or [`NodeRef`], or
@@ -57,19 +60,17 @@
 //! are buffered; a top-level object therefore reaches the sink only when it
 //! is complete. Buffered bytes are canonical output and count against
 //! [`Limits::max_bytes`]; on top of that come 8 bytes of offsets per buffered
-//! member, small records per nested object, and `Vec` growth slack (see
-//! [`Writer`]). `tests/memory.rs` holds the measured peak heap for a flat
-//! object of small members under 4x the canonical length.
+//! member, small records per open and nested object, and `Vec` growth slack
+//! (see [`Writer`]). `tests/memory.rs` measures the peak heap per shape: under
+//! 4x the canonical length for flat objects and objects of objects, and under
+//! 32x for a deep chain of objects, the worst shape per byte. [`read`] peaks
+//! under 64x its input length.
 //!
 //! ```
-//! use quire_canonical::{nest, to_vec, FixedShape, Limits};
+//! use quire_canonical::{to_vec, FixedShape, Limits};
 //!
-//! #[derive(serde::Serialize)]
+//! #[derive(serde::Serialize, FixedShape)]
 //! struct Example { b: f64, a: &'static str }
-//!
-//! impl FixedShape for Example {
-//!     const DEPTH: usize = nest(&[f64::DEPTH, <&str>::DEPTH]);
-//! }
 //!
 //! let bytes = to_vec(&Example { b: 1e21, a: "ö" }, Limits::new(1024))?;
 //! assert_eq!(bytes, "{\"a\":\"ö\",\"b\":1e+21}".as_bytes());
@@ -110,11 +111,13 @@ pub use crate::identity::{
 pub use crate::read::{
     read, Document, Items, Malformed, Members, Node, NodeRef, Number, ReadError,
 };
-pub use crate::shape::{nest, FixedShape};
+pub use crate::shape::{deepest, nest, FixedShape};
 pub use crate::sink::Sink;
 #[cfg(feature = "std")]
 pub use crate::sink::WriteSink;
 pub use crate::writer::Writer;
+/// `#[derive(FixedShape)]`: computes `DEPTH` from every field's `DEPTH`.
+pub use quire_canonical_derive::FixedShape;
 
 /// The explicit bounds every encoding runs under: a canonical byte ceiling,
 /// and nothing else. Depth is not a limit; it costs bytes.

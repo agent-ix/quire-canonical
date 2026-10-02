@@ -20,6 +20,15 @@
 //! There is no depth limit. Growth uses `try_reserve`, so exhausting memory
 //! is a refusal, not an abort.
 //!
+//! The constant is not small: a node costs a 32-byte slot and an 8- or
+//! 24-byte child entry, an open container a 16-byte stack entry, and an open
+//! object's member a 32-byte pending record, before `Vec` growth slack. For
+//! inputs made of one- and two-byte values (`[[[...]]]`, `[1,1,...]`,
+//! `{"k":{"k":...}}`) `tests/memory.rs` measures the peak heap at under 64x
+//! the input length (between 19x and 47x). Size the input byte limit with
+//! that multiple in mind: a 16 MiB input may take up to 1 GiB while it is
+//! read.
+//!
 //! # What it accepts
 //!
 //! Exactly one JSON value, surrounded by optional JSON whitespace, as UTF-8.
@@ -138,6 +147,12 @@ enum Slot {
 /// Every node, child list and string lives in a flat vector, so cloning,
 /// comparing, printing and dropping a document never recurse, whatever its
 /// depth.
+///
+/// Equality is structural, not JSON value equality: two documents are equal
+/// when they hold the same members in the same order and the same number
+/// spellings. `{"a":1,"b":2}` and `{"b":2,"a":1}` differ, and so do `1` and
+/// `1.0`. Two documents denote the same JSON value exactly when their RFC
+/// 8785 bytes are equal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     /// Decoded strings and number literals, back to back.
@@ -456,16 +471,17 @@ enum Expect {
 /// One open container while reading.
 struct OpenContainer {
     object: bool,
-    /// Where this container's children start in the parser's scratch list.
-    scratch_start: usize,
-    /// The name of the member whose value is being read, and its offset.
-    name: Option<(Range, usize)>,
+    /// Where this container's children start on the parser's
+    /// `scratch_members` (an object) or `scratch_items` (an array).
+    start: usize,
 }
 
-/// A child read but not yet attached to its closed container.
-struct Child {
-    /// The member name and its offset; `None` in an array.
-    name: Option<(Range, usize)>,
+/// An object member read but not yet attached to its closed object. It is
+/// pushed when its name is read; `id` is set when its value completes.
+struct PendingMember {
+    name: Range,
+    /// The name's byte offset in the input.
+    offset: usize,
     id: usize,
 }
 
@@ -478,7 +494,10 @@ struct Parser<'i> {
     items: Vec<usize>,
     members: Vec<(Range, usize)>,
     stack: Vec<OpenContainer>,
-    scratch: Vec<Child>,
+    /// The children of every open array, innermost last.
+    scratch_items: Vec<usize>,
+    /// The members of every open object, innermost last.
+    scratch_members: Vec<PendingMember>,
     /// Reused order buffer for the duplicate-name check.
     order: Vec<usize>,
 }
@@ -515,7 +534,8 @@ impl<'i> Parser<'i> {
             items: Vec::new(),
             members: Vec::new(),
             stack: Vec::new(),
-            scratch: Vec::new(),
+            scratch_items: Vec::new(),
+            scratch_members: Vec::new(),
             order: Vec::new(),
         })
     }
@@ -627,8 +647,11 @@ impl<'i> Parser<'i> {
                     &mut self.stack,
                     OpenContainer {
                         object,
-                        scratch_start: self.scratch.len(),
-                        name: None,
+                        start: if object {
+                            self.scratch_members.len()
+                        } else {
+                            self.scratch_items.len()
+                        },
                     },
                 )?;
                 return Ok(if object {
@@ -665,9 +688,19 @@ impl<'i> Parser<'i> {
 
     /// Attach a finished value to its container, or make it the root.
     fn complete(&mut self, id: usize) -> Result<Expect, ReadError> {
-        if let Some(open) = self.stack.last_mut() {
-            let name = open.name.take();
-            push(&mut self.scratch, Child { name, id })?;
+        match self.stack.last() {
+            Some(OpenContainer { object: true, .. }) => {
+                let member = self
+                    .scratch_members
+                    .last_mut()
+                    .ok_or(ReadError::Malformed {
+                        offset: self.position,
+                        kind: Malformed::UnexpectedCharacter,
+                    })?;
+                member.id = id;
+            }
+            Some(OpenContainer { object: false, .. }) => push(&mut self.scratch_items, id)?,
+            None => {}
         }
         Ok(Expect::Separator)
     }
@@ -684,10 +717,14 @@ impl<'i> Parser<'i> {
             return Err(self.unexpected());
         }
         self.position += 1;
-        if let Some(open) = self.stack.last_mut() {
-            open.name = Some((name, offset));
-        }
-        Ok(())
+        push(
+            &mut self.scratch_members,
+            PendingMember {
+                name,
+                offset,
+                id: 0,
+            },
+        )
     }
 
     /// Close the innermost container, whose closing byte has been consumed.
@@ -699,41 +736,36 @@ impl<'i> Parser<'i> {
         if open.object != object {
             return Err(self.malformed(closing, Malformed::UnexpectedCharacter));
         }
-        if object {
-            self.check_unique_names(open.scratch_start)?;
-        }
-        let children = self.scratch.get(open.scratch_start..).unwrap_or_default();
         let slot = if object {
+            self.check_unique_names(open.start)?;
+            let pending = self.scratch_members.get(open.start..).unwrap_or_default();
             let start = self.members.len();
-            reserve(&mut self.members, children.len())?;
-            for child in children {
-                let (name, _) = child.name.ok_or(ReadError::Malformed {
-                    offset: closing,
-                    kind: Malformed::UnexpectedCharacter,
-                })?;
-                self.members.push((name, child.id));
-            }
+            reserve(&mut self.members, pending.len())?;
+            self.members
+                .extend(pending.iter().map(|member| (member.name, member.id)));
+            self.scratch_members.truncate(open.start);
             Slot::Object(Range {
                 start,
                 end: self.members.len(),
             })
         } else {
+            let items = self.scratch_items.get(open.start..).unwrap_or_default();
             let start = self.items.len();
-            reserve(&mut self.items, children.len())?;
-            self.items.extend(children.iter().map(|child| child.id));
+            reserve(&mut self.items, items.len())?;
+            self.items.extend_from_slice(items);
+            self.scratch_items.truncate(open.start);
             Slot::Array(Range {
                 start,
                 end: self.items.len(),
             })
         };
-        self.scratch.truncate(open.scratch_start);
         self.node(slot)
     }
 
-    /// Refuse the object whose members start at `scratch_start` when two
-    /// share a name, at the later one's offset.
-    fn check_unique_names(&mut self, scratch_start: usize) -> Result<(), ReadError> {
-        let children = self.scratch.get(scratch_start..).unwrap_or_default();
+    /// Refuse the object whose members start at `start` on
+    /// `scratch_members` when two share a name, at the later one's offset.
+    fn check_unique_names(&mut self, start: usize) -> Result<(), ReadError> {
+        let children = self.scratch_members.get(start..).unwrap_or_default();
         if children.len() < 2 {
             return Ok(());
         }
@@ -741,9 +773,9 @@ impl<'i> Parser<'i> {
         let name_of = |index: usize| {
             children
                 .get(index)
-                .and_then(|child| child.name)
-                .map(|(range, offset)| {
-                    (text.get(range.start..range.end).unwrap_or_default(), offset)
+                .map(|member| {
+                    let name = text.get(member.name.start..member.name.end);
+                    (name.unwrap_or_default(), member.offset)
                 })
                 .unwrap_or_default()
         };

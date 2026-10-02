@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
-//! Peak heap while encoding, measured with a counting global allocator.
+//! Peak heap while encoding and reading, measured with a counting global
+//! allocator.
 //!
 //! This binary holds one test so no other test allocates concurrently; the
 //! measurement is a deterministic count of bytes, not a timing.
-//!
-//! The worst shape for the member buffers is a flat top-level object of small
-//! members: all of it is buffered until it closes, and the per-member offsets
-//! are large next to members of a few bytes.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use quire_canonical::{sha256, to_vec, Limits};
+use quire_canonical::{read, sha256, to_vec, Limits, Writer};
 
 struct Counting;
 
@@ -62,11 +59,40 @@ fn peak_during(run: impl FnOnce()) -> usize {
     PEAK.load(Ordering::SeqCst) - baseline
 }
 
-/// FND-003: the measured bound the docs state. A 20,000-member flat object
-/// peaked at 15.9x its canonical length with one `Vec` per member; one buffer
-/// per frame plus 8-byte offsets keeps it under 4x.
+/// A `{"k":{"k":...null...}}` chain `levels` deep, pushed as events, hashed.
+fn deep_object_chain(levels: usize, limits: Limits) -> u64 {
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut writer = Writer::new(&mut hasher, limits);
+    for _ in 0..levels {
+        writer.begin_object().expect("open");
+        writer.name("k").expect("name");
+    }
+    writer.null().expect("leaf");
+    for _ in 0..levels {
+        writer.end_object().expect("close");
+    }
+    writer.finish().expect("complete")
+}
+
+/// `ratio` of `peak` to `length`, printed for the record.
+fn ratio(name: &str, length: usize, peak: usize) -> f64 {
+    let ratio = peak as f64 / length as f64;
+    println!("{name}: {length} bytes, peak heap {peak} bytes, ratio {ratio:.2}");
+    ratio
+}
+
+/// The measured bounds the writer and reader docs state, per shape. One test,
+/// so nothing else in this binary allocates while it measures.
+///
+/// * A flat object of small members, the worst case for member offsets,
+///   stays under 4x its canonical length, and so does an object of objects.
+/// * A deep object chain, the worst case per byte (a stack entry, a frame
+///   and a closed-object record for every 6 bytes of `{"k":` and `}`), stays
+///   under the bound the writer docs give for it.
+/// * The reader stays under the multiple of its input the reader docs give,
+///   for deep arrays, deep objects and flat arrays of one-byte numbers.
 #[test]
-fn flat_object_peak_heap_stays_under_four_times_the_output() {
+fn peak_heap_stays_within_the_documented_bounds() {
     let limits = Limits::new(u64::MAX);
     let flat: BTreeMap<String, u32> = (0..20_000).map(|index| (format!("{index}"), 1)).collect();
     let nested: BTreeMap<String, BTreeMap<String, u32>> = (0..200)
@@ -92,11 +118,46 @@ fn flat_object_peak_heap_stays_under_four_times_the_output() {
             }),
         ),
     ] {
-        let ratio = peak as f64 / length as f64;
-        println!("{name}: canonical {length} bytes, peak heap {peak} bytes, ratio {ratio:.2}");
+        let ratio = ratio(name, length, peak);
         assert!(
             ratio < 4.0,
             "{name}: peak heap {ratio:.2}x the canonical length"
         );
     }
+
+    for levels in [1_000, 10_000, 100_000] {
+        let mut length = 0;
+        let peak = peak_during(|| length = deep_object_chain(levels, limits));
+        let length = usize::try_from(length).expect("fits");
+        let ratio = ratio(&format!("deep object chain {levels}"), length, peak);
+        assert!(
+            ratio < DEEP_OBJECT_BOUND,
+            "deep chain {levels}: peak heap {ratio:.2}x the canonical length"
+        );
+    }
+
+    for size in [1_000, 10_000, 100_000] {
+        let deep_arrays = format!("{}{}", "[".repeat(size), "]".repeat(size));
+        let deep_objects = format!("{}null{}", r#"{"k":"#.repeat(size), "}".repeat(size));
+        let flat_numbers = format!("[{}1]", "1,".repeat(size));
+        for (name, input) in [
+            ("deep arrays", deep_arrays),
+            ("deep objects", deep_objects),
+            ("flat numbers", flat_numbers),
+        ] {
+            let peak = peak_during(|| {
+                read(input.as_bytes(), u64::MAX).expect("reads");
+            });
+            let ratio = ratio(&format!("read {name} {size}"), input.len(), peak);
+            assert!(
+                ratio < READ_BOUND,
+                "read {name} {size}: peak heap {ratio:.2}x the input length"
+            );
+        }
+    }
 }
+
+/// The deep-object bound the writer docs state.
+const DEEP_OBJECT_BOUND: f64 = 32.0;
+/// The input multiple the reader docs state.
+const READ_BOUND: f64 = 64.0;

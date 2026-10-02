@@ -18,7 +18,8 @@ use serde::Serialize;
 
 const LIMITS: Limits = Limits::new(1 << 16);
 
-/// Implements `FixedShape` for a test type whose JSON nests `$depth` levels.
+/// Implements `FixedShape` for a test type with a hand-written `Serialize`,
+/// whose JSON nests `$depth` levels.
 macro_rules! fixed_shape {
     ($($name:ty => $depth:expr),* $(,)?) => {
         $(impl FixedShape for $name {
@@ -28,7 +29,6 @@ macro_rules! fixed_shape {
 }
 
 fixed_shape!(
-    Shape => nest(&[nest(&[u8::DEPTH])]),
     Duplicated => nest(&[u8::DEPTH]),
     ArbitraryPrecisionNumber => nest(&[<&str>::DEPTH]),
     Shown => 0,
@@ -40,7 +40,7 @@ fn canonical<T: FixedShape + ?Sized>(value: &T) -> String {
     String::from_utf8(to_vec(value, LIMITS).expect("encodes")).expect("UTF-8")
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 enum Shape {
     Unit,
     Newtype(u8),

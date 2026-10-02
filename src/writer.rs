@@ -43,16 +43,24 @@
 //!
 //! What the ceiling does not count:
 //!
-//! * the 8 bytes of offsets per buffered member;
-//! * a few bytes of stack entry per open container, and a 24-byte record per
-//!   object closed inside another;
-//! * the walk's task stack when the outermost object is written out;
+//! * 8 bytes of offsets per buffered member;
+//! * 2 bytes of stack entry per open container, and a 20-byte frame per open
+//!   object;
+//! * a 36-byte record (with its member and child entries) per object closed
+//!   inside another, until the outermost object is written out;
+//! * the walk's task stack while the outermost object is written out;
 //! * `Vec` growth slack (amortized doubling, up to the length again).
 //!
-//! `tests/memory.rs` measures the peak heap of the worst shape, a flat object
-//! of small members, and keeps it under 4x the canonical length. Every
-//! structure grows with `try_reserve`, so exhausting memory is a refusal, not
-//! an abort.
+//! So the peak heap depends on the shape. `tests/memory.rs` measures it:
+//!
+//! * a flat object of small members, or an object of such objects: under 4x
+//!   the canonical length;
+//! * a deep chain of objects with one-letter names (`{"k":{"k":...}}`), the
+//!   worst shape per byte, since each 6 bytes of text carries a stack entry,
+//!   a frame and a closed record: under 32x the canonical length.
+//!
+//! Memory is linear in the canonical length for every shape. Every structure
+//! grows with `try_reserve`, so exhausting memory is a refusal, not an abort.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -74,16 +82,20 @@ struct Span {
     end: u32,
 }
 
-/// An open object.
-#[derive(Default)]
+/// An open object. Its finished members and closed children sit on the
+/// writer's shared `open_members` and `open_children` stacks, from the
+/// recorded starts up: an inner object's entries are always above its
+/// parent's, and leave before the parent adds its next one.
 struct Frame {
     /// Where its members start in the buffer, just after its `{`.
     start: u32,
-    /// Finished members, in the order they were written.
-    members: Vec<Span>,
-    /// Objects closed while this was the innermost open object, in the order
-    /// they were written, as indexes into `Writer::closed`.
-    children: Vec<u32>,
+    /// Where its finished members start on `Writer::open_members`, in the
+    /// order they were written.
+    members: u32,
+    /// Where its children start on `Writer::open_children`: objects closed
+    /// while this was the innermost open object, in written order, as
+    /// indexes into `Writer::closed`.
+    children: u32,
     /// Where the member being written starts, once its name is written and
     /// until its value is.
     pending: Option<u32>,
@@ -173,6 +185,10 @@ pub struct Writer<'s, S: Sink + ?Sized> {
     frames: Vec<Frame>,
     /// Canonical bytes produced while any object is open.
     buffer: Vec<u8>,
+    /// The finished members of every open object (see [`Frame`]).
+    open_members: Vec<Span>,
+    /// The closed children of every open object (see [`Frame`]).
+    open_children: Vec<u32>,
     /// Objects closed inside another, until the outermost one is written out.
     closed: Vec<Closed>,
     closed_members: Vec<Span>,
@@ -206,6 +222,8 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             stack: Vec::new(),
             frames: Vec::new(),
             buffer: Vec::new(),
+            open_members: Vec::new(),
+            open_children: Vec::new(),
             closed: Vec::new(),
             closed_members: Vec::new(),
             closed_children: Vec::new(),
@@ -331,10 +349,13 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             let start = buffer_offset(&writer.buffer)?;
             reserve(&mut writer.frames, 1)?;
             writer.push_open(Open::Object)?;
-            writer.frames.push(Frame {
+            let frame = Frame {
                 start,
-                ..Frame::default()
-            });
+                members: index_u32(writer.open_members.len())?,
+                children: index_u32(writer.open_children.len())?,
+                pending: None,
+            };
+            writer.frames.push(frame);
             Ok(())
         })
     }
@@ -527,8 +548,8 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         let start = frame.pending.take().ok_or(Error::Internal {
             invariant: "a member value follows its name",
         })?;
-        reserve(&mut frame.members, 1)?;
-        frame.members.push(Span { start, end });
+        reserve(&mut self.open_members, 1)?;
+        self.open_members.push(Span { start, end });
         Ok(())
     }
 
@@ -539,16 +560,17 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         if self.top_frame()?.pending.is_some() {
             return Err(Error::Protocol(ProtocolViolation::ObjectEndedAfterName));
         }
-        let Frame {
-            start,
-            mut members,
-            children,
-            pending: _,
-        } = self.frames.pop().ok_or(Error::Internal {
+        let frame = self.frames.pop().ok_or(Error::Internal {
             invariant: "every open object has a frame",
         })?;
         self.stack.pop();
         let buffer = &self.buffer;
+        let members =
+            self.open_members
+                .get_mut(frame.members as usize..)
+                .ok_or(Error::Internal {
+                    invariant: "an open object's members start inside the stack",
+                })?;
         // Unstable sort: in place, no allocation. Names are unique (checked
         // next), so stability cannot matter. A span outside the buffer sorts
         // as empty here and is refused below.
@@ -570,22 +592,41 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         }
         // The commas between members and the closing brace are counted now
         // and written by the walk.
-        self.count(members.len().max(1))?;
+        let member_count = members.len();
+        self.count(member_count.max(1))?;
         if self.frames.is_empty() {
+            // The outermost object: its entries are the whole of both stacks.
+            let members = core::mem::take(&mut self.open_members);
+            let children = core::mem::take(&mut self.open_children);
             self.write_out(&members, &children)?;
         } else {
+            let members = slice_of(
+                &self.open_members,
+                Span {
+                    start: frame.members,
+                    end: index_u32(self.open_members.len())?,
+                },
+            )?;
+            let children = slice_of(
+                &self.open_children,
+                Span {
+                    start: frame.children,
+                    end: index_u32(self.open_children.len())?,
+                },
+            )?;
             let closed = Closed {
-                start,
+                start: frame.start,
                 end: buffer_offset(&self.buffer)?,
-                members: append(&mut self.closed_members, &members)?,
-                children: append(&mut self.closed_children, &children)?,
+                members: append(&mut self.closed_members, members)?,
+                children: append(&mut self.closed_children, children)?,
             };
+            self.open_members.truncate(frame.members as usize);
+            self.open_children.truncate(frame.children as usize);
             let id = index_u32(self.closed.len())?;
             reserve(&mut self.closed, 1)?;
             self.closed.push(closed);
-            let parent = self.top_frame()?;
-            reserve(&mut parent.children, 1)?;
-            parent.children.push(id);
+            reserve(&mut self.open_children, 1)?;
+            self.open_children.push(id);
         }
         self.after_value()
     }

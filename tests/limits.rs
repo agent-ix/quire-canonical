@@ -7,8 +7,8 @@
 //! heap stack the crate grows is bounded by one of them.
 
 use quire_canonical::{
-    encode, nest, read, sha256, to_vec, Error, FixedShape, LimitExceeded, LimitKind, Limits,
-    Malformed, ReadError, Writer,
+    encode, read, sha256, to_vec, Error, FixedShape, LimitExceeded, LimitKind, Limits, Malformed,
+    ReadError, Writer,
 };
 use serde::Serialize;
 
@@ -16,25 +16,17 @@ fn limits(max_bytes: u64) -> Limits {
     Limits::new(max_bytes)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 struct Record {
     zeta: Vec<u32>,
     alpha: &'static str,
     nested: Inner,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 struct Inner {
     y: bool,
     x: Option<u8>,
-}
-
-impl FixedShape for Record {
-    const DEPTH: usize = nest(&[Vec::<u32>::DEPTH, <&str>::DEPTH, Inner::DEPTH]);
-}
-
-impl FixedShape for Inner {
-    const DEPTH: usize = nest(&[bool::DEPTH, Option::<u8>::DEPTH]);
 }
 
 fn record() -> Record {
