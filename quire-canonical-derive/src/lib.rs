@@ -15,9 +15,20 @@
 //!
 //! Every field's type is named, so a type that contains itself refers to its
 //! own `DEPTH`, and rustc refuses the cycle (E0391). The value itself is
-//! never a limit, so serde attributes that change the nesting (`flatten`,
-//! `tag`, `untagged`, `skip`, ...) do not make it wrong in any way that
-//! matters; every field, skipped or not, must still implement `FixedShape`.
+//! never a limit. Every field, skipped or not, must implement `FixedShape`.
+//!
+//! The derive reads the fields, not the serde attributes, so the guarantee
+//! holds only while serde serializes those fields:
+//!
+//! * `flatten`, `tag`, `content`, `untagged`, `transparent` and `skip` only
+//!   reshape or drop field values, so the derived `DEPTH` is at worst an
+//!   overestimate, and a recursive field still fails to compile.
+//! * `into`, `serialize_with`, `with` and `remote` route serialization
+//!   through arbitrary code that the derive cannot see. For example,
+//!   `#[serde(into = "serde_json::Value")]` with a `From` impl that builds a
+//!   deep value recurses natively through serde and can overflow the stack.
+//!   These carry the same hazard as a hand-written `Serialize` or a literal
+//!   `DEPTH`: use them only for code that emits a value of fixed depth.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;

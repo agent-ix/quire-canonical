@@ -58,3 +58,12 @@ Changes requested: one medium and one low coverage gap.
 | --- | --- | --- | --- |
 | FND-001 | medium | FR-259 capability 4 ("a serde encoding path that only fixed-depth types can take") is backed only by a test where `DEPTH` refers to the type itself. A `FixedShape` with a literal `DEPTH` over a recursive value compiles and takes the serde path; reproduced, it overflows the stack. Nothing records this limit of the guarantee. Same root cause as SR-1240 FND-001. Fix there: docs and a derive. | src/shape.rs:15-43; src/encoder.rs:31-35 |
 | FND-002 | low | tests/memory.rs, the only peak-heap test, covers a flat object and a two-level object of objects. It does not cover a deep object chain, the shape with the largest heap per canonical byte (about 32-39x). So the documented memory bound has no test for the case it most needs. Related to SR-1240 FND-002. Fix: add a deep-object case with the bound the docs will state. | tests/memory.rs:64-99 |
+
+## Dispositions
+
+Round 1, reviewed at c3003cc697d69f94e932f76e555f829d4f8b771d.
+
+| FND | Outcome | sha/reason |
+| --- | --- | --- |
+| FND-001 | fixed | c3003cc: FR-259 capability 4 is now backed by `#[derive(FixedShape)]`, which cannot be derived by a recursive type: `tests/derive.rs::recursive_type_deriving_fixed_shape_fails_with_e0391` passed and asserts `error[E0391]`. The docs record the limit of the guarantee for hand-written literal `DEPTH`s. The remaining derive escape hatch (`into`/`serialize_with`/`remote`) is SR-1240 FND-006. |
+| FND-002 | fixed | c3003cc: tests/memory.rs `peak_heap_stays_within_the_documented_bounds` now covers a deep object chain at 1k/10k/100k against `DEEP_OBJECT_BOUND` 32x (measured 16.72-25.67x), and the reader against 64x (measured 18.74-46.88x). |

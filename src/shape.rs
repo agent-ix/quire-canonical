@@ -59,6 +59,15 @@ use crate::Sha256Digest;
 /// write a literal for a type with no fields to name, such as one with a
 /// hand-written `Serialize` that emits a scalar.
 ///
+/// The derive does not see serde attributes that replace a field's or a
+/// type's serialization with other code: `#[serde(into = "...")]`,
+/// `#[serde(serialize_with = "...")]`, `#[serde(with = "...")]` and
+/// `#[serde(remote = "...")]`. They carry the same hazard as a literal
+/// `DEPTH` or a hand-written `Serialize`: `into = "serde_json::Value"` can
+/// recurse natively over a deep value. Use them only for code that emits a
+/// value of fixed depth. (`flatten`, `tag`, `untagged` and `skip` only make
+/// the derived `DEPTH` an overestimate, which is harmless.)
+///
 /// A type whose depth follows its input implements [`crate::Encode`] instead,
 /// pushing [`crate::Writer`] events from an explicit stack.
 pub trait FixedShape: Serialize {
