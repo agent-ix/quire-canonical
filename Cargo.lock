@@ -109,11 +109,21 @@ dependencies = [
 name = "quire-canonical"
 version = "0.3.0"
 dependencies = [
+ "quire-canonical-derive",
  "ryu-js",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "quire-canonical-derive"
+version = "0.3.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

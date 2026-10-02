@@ -5,26 +5,45 @@ Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes.
 ## Use
 
 ```rust
-use quire_canonical::{sha256, to_vec, Limits};
+use quire_canonical::{read, sha256, to_vec, Limits, Writer};
 
-let limits = Limits::new(1 << 20, 128)?; // byte ceiling, nesting depth (<= Limits::MAX_DEPTH)
-let bytes = to_vec(&value, limits)?;     // RFC 8785 bytes
-let digest = sha256(&value, limits)?;    // hashed while encoding
+let limits = Limits::new(1 << 20);           // canonical byte ceiling; no depth limit
+let bytes = to_vec(&fixed_shape_value, limits)?; // a `FixedShape` type, through serde
+let document = read(json_bytes, 1 << 20)?;   // untrusted JSON into an arena tree
+let digest = sha256(&document, limits)?;     // hashed while encoding
+
+let mut writer = Writer::new(&mut sink, limits); // push events from your own stack
+writer.begin_array()?;
+writer.integer(1)?;
+writer.end_array()?;
+writer.finish()?;
 ```
+
+Nothing recurses in proportion to its input and nothing bounds depth: only
+byte limits apply. A value reaches the encoder through the `Writer` event API
+(data whose depth follows its input), as a `Document` from the reader, or
+through serde for a `FixedShape` type, whose depth is fixed by its schema.
+`#[derive(FixedShape)]` computes `DEPTH` from every field's `DEPTH`, so a
+recursive type that derives it is a compile-time cycle (E0391). A hand-written
+impl gets the same check only if its `DEPTH` is `nest` over every field's
+`DEPTH`; a literal `DEPTH` defeats it, and a recursive value can then overflow
+the stack through serde.
 
 `encode` writes into any `Sink` (a `sha2::Sha256`, a `Vec<u8>`, a
 `WriteSink<impl io::Write>`, or a pair of sinks). Member names are sorted by
-UTF-16 code unit by the encoder, so output does not depend on map backing or
-`serde_json` features. A limit refuses the encoding; it never truncates.
+UTF-16 code unit by the encoder, so output does not depend on map backing. A
+limit refuses the encoding; it never truncates. The reader refuses malformed
+input with the byte offset of the fault, and an over-long input with its byte
+limit, which is never reported as malformed input.
 
 The crate is `no_std` + `alloc`. The default `std` feature adds only
 `WriteSink` and `Error::Sink`; with `default-features = false`, encoding into a
-`Vec<u8>` or a hasher, `to_vec`, `sha256` and `sha256_with_domain` all work
-without `std`. `make build-no-std` builds that configuration for
-`thumbv7em-none-eabi`.
+`Vec<u8>` or a hasher, `to_vec`, `sha256`, `sha256_with_domain`, the
+`Writer` and the reader all work without `std`. `make build-no-std` builds
+that configuration for `thumbv7em-none-eabi`.
 
-Arrays and scalars stream to the sink. Each open object buffers its members'
-canonical bytes until it closes, so it can sort them; a top-level object is
+Arrays and scalars stream to the sink. While any object is open its canonical
+bytes are buffered, so its members can be sorted; a top-level object is
 therefore held whole before the first byte is hashed. The buffered bytes count
 against the byte ceiling; see the crate docs for the full memory bound.
 

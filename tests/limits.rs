@@ -2,25 +2,28 @@
 // Copyright (C) 2026 Agent-IX
 //! PLAT-987 AC-4: at a limit the encoder refuses with a cause naming the limit
 //! kind and bound, and never returns truncated output as success.
+//!
+//! The byte limits are the only limits (QSL FR-259, ADR-030 D-4.5), and every
+//! heap stack the crate grows is bounded by one of them.
 
-use quire_canonical::{encode, sha256, to_vec, Error, LimitExceeded, LimitKind, Limits};
-use serde::ser::{SerializeSeq, Serializer};
+use quire_canonical::{
+    encode, read, sha256, to_vec, Error, FixedShape, LimitExceeded, LimitKind, Limits, Malformed,
+    ReadError, Writer,
+};
 use serde::Serialize;
 
-const DEPTH: u32 = 64;
-
-fn limits(max_bytes: u64, max_depth: u32) -> Limits {
-    Limits::new(max_bytes, max_depth).expect("depth within MAX_DEPTH")
+fn limits(max_bytes: u64) -> Limits {
+    Limits::new(max_bytes)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 struct Record {
     zeta: Vec<u32>,
     alpha: &'static str,
     nested: Inner,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 struct Inner {
     y: bool,
     x: Option<u8>,
@@ -40,7 +43,7 @@ const RECORD_CANONICAL: &str =
 #[test]
 fn exact_bound_succeeds() {
     let length = u64::try_from(RECORD_CANONICAL.len()).expect("fits");
-    let bytes = to_vec(&record(), limits(length, DEPTH)).expect("fits exactly");
+    let bytes = to_vec(&record(), limits(length)).expect("fits exactly");
     assert_eq!(bytes, RECORD_CANONICAL.as_bytes());
 }
 
@@ -48,7 +51,7 @@ fn exact_bound_succeeds() {
 fn every_smaller_bound_refuses_with_the_byte_limit_and_never_truncates() {
     let length = u64::try_from(RECORD_CANONICAL.len()).expect("fits");
     for bound in 0..length {
-        let limits = limits(bound, DEPTH);
+        let limits = limits(bound);
         match to_vec(&record(), limits) {
             Err(Error::Limit(LimitExceeded {
                 kind: LimitKind::CanonicalBytes,
@@ -74,138 +77,105 @@ fn every_smaller_bound_refuses_with_the_byte_limit_and_never_truncates() {
 fn sort_buffers_are_metered_before_they_reach_the_sink() {
     // 20 bytes is reached while the members are still being buffered.
     let mut sink = Vec::new();
-    let refused = encode(&mut sink, &record(), limits(20, DEPTH));
+    let refused = encode(&mut sink, &record(), limits(20));
     assert!(matches!(refused, Err(Error::Limit(_))));
     assert_eq!(sink, b"{");
 }
 
 #[test]
 fn limit_display_names_kind_and_bound() {
-    let error = to_vec(&record(), limits(10, DEPTH)).expect_err("too small");
+    let error = to_vec(&record(), limits(10)).expect_err("too small");
     let message = error.to_string();
     assert!(message.contains("canonical bytes"), "{message}");
     assert!(message.contains("bound 10"), "{message}");
 }
 
-/// Arrays nested `levels` deep, built without recursion in the value.
-struct Nest(u32);
-
-impl Serialize for Nest {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut seq = serializer.serialize_seq(Some(1))?;
-        if self.0 > 1 {
-            seq.serialize_element(&Nest(self.0 - 1))?;
-        }
-        seq.end()
-    }
-}
-
+/// The writer's stack of open containers grows only by producing a `[` or
+/// `{` first, so the byte ceiling bounds it. Every open costs one byte, so
+/// `N` opens fit a ceiling of `N` bytes and the next is refused with the byte
+/// limit, naming the bound, whatever the depth.
 #[test]
-fn depth_at_bound_succeeds_and_beyond_refuses() {
-    let bytes = to_vec(&Nest(4), limits(1024, 4)).expect("depth 4 fits");
-    assert_eq!(bytes, b"[[[[]]]]");
-    match to_vec(&Nest(5), limits(1024, 4)) {
+fn deep_opens_are_refused_on_bytes_not_depth() {
+    const CEILING: u64 = 10_000;
+    let mut sink = Vec::new();
+    let mut writer = Writer::new(&mut sink, limits(CEILING));
+    for _ in 0..CEILING {
+        writer.begin_array().expect("within the ceiling");
+    }
+    assert_eq!(writer.produced(), CEILING);
+    match writer.begin_array() {
         Err(Error::Limit(LimitExceeded {
-            kind: LimitKind::NestingDepth,
-            bound: 4,
-            required: 5,
-        })) => {}
-        other => panic!("expected depth refusal, got {other:?}"),
+            kind: LimitKind::CanonicalBytes,
+            bound: CEILING,
+            required,
+        })) => assert_eq!(required, CEILING + 1),
+        other => panic!("expected the byte limit, got {other:?}"),
     }
+    assert_eq!(sink.len(), usize::try_from(CEILING).expect("fits"));
 }
 
-/// A hostile depth is refused at the bound, long before the native stack is
-/// at risk.
+/// Objects nested inside objects are buffered for sorting; their records and
+/// the buffer are bounded by the same ceiling.
 #[test]
-fn hostile_depth_is_refused_not_a_stack_overflow() {
-    let refused = to_vec(&Nest(1_000_000), limits(u64::MAX, DEPTH));
+fn nested_object_buffers_are_refused_on_bytes() {
+    let mut sink = Vec::new();
+    let mut writer = Writer::new(&mut sink, limits(64));
+    let refused = (0..64).try_for_each(|_| {
+        writer.begin_object()?;
+        writer.name("k")
+    });
     assert!(matches!(
         refused,
         Err(Error::Limit(LimitExceeded {
-            kind: LimitKind::NestingDepth,
+            kind: LimitKind::CanonicalBytes,
+            bound: 64,
             ..
         }))
     ));
+    assert_eq!(sink, b"{", "nothing past the outer brace reached the sink");
 }
 
+/// The tree encoder's task stack is bounded by the document's nodes, and the
+/// output it drives is bounded by the byte ceiling: a deep document under a
+/// small ceiling is refused on bytes.
 #[test]
-fn objects_and_enum_wrappers_count_toward_depth() {
-    #[derive(Serialize)]
-    enum Wrapper {
-        Struct { inner: Inner },
-    }
-    let value = Wrapper::Struct {
-        inner: Inner {
-            y: false,
-            x: Some(1),
-        },
-    };
-    // `{"Struct":{"inner":{...}}}` opens three objects.
-    assert!(to_vec(&value, limits(1024, 3)).is_ok());
+fn deep_document_encoding_is_refused_on_bytes() {
+    let text = format!("{}{}", "[".repeat(5_000), "]".repeat(5_000));
+    let document = read(text.as_bytes(), u64::MAX).expect("reads");
     assert!(matches!(
-        to_vec(&value, limits(1024, 2)),
+        to_vec(&document, limits(4_999)),
         Err(Error::Limit(LimitExceeded {
-            kind: LimitKind::NestingDepth,
-            bound: 2,
-            required: 3,
+            kind: LimitKind::CanonicalBytes,
+            bound: 4_999,
+            required: 5_000,
         }))
     ));
+    assert_eq!(
+        to_vec(&document, limits(10_000)).expect("fits").len(),
+        10_000
+    );
 }
 
-/// FND-009: a depth above the supported maximum is refused, not clamped.
+/// The reader's stack, nodes and text are linear in the input, and the input
+/// byte limit is checked before any of it is read: an over-limit input is a
+/// byte refusal even when it is also malformed, never a malformed-input one.
 #[test]
-fn depth_above_the_maximum_is_refused() {
-    assert!(Limits::new(1024, Limits::MAX_DEPTH).is_ok());
-    let refused = Limits::new(1024, Limits::MAX_DEPTH + 1).expect_err("too deep");
-    assert_eq!(refused.requested, Limits::MAX_DEPTH + 1);
-    assert_eq!(refused.maximum, Limits::MAX_DEPTH);
-    assert!(Limits::new(1024, u32::MAX).is_err());
-}
-
-/// PLAT-1074: `MAX_DEPTH` is 576; 576 levels canonicalize and 577 refuses
-/// with the existing nesting-depth error.
-#[test]
-fn max_depth_576_encodes_and_577_refuses() {
-    assert_eq!(Limits::MAX_DEPTH, 576);
-    let bound_limits = limits(u64::MAX, Limits::MAX_DEPTH);
-    assert!(to_vec(&Nest(576), bound_limits).is_ok());
-    match to_vec(&Nest(577), bound_limits) {
-        Err(Error::Limit(LimitExceeded {
-            kind: LimitKind::NestingDepth,
-            bound: 576,
-            required: 577,
+fn reader_input_byte_limit_is_checked_first_and_is_not_malformed_input() {
+    let deep = "[".repeat(1_001);
+    match read(deep.as_bytes(), 1_000) {
+        Err(ReadError::Limit(LimitExceeded {
+            kind: LimitKind::InputBytes,
+            bound: 1_000,
+            required: 1_001,
         })) => {}
-        other => panic!("expected depth refusal at 577, got {other:?}"),
+        other => panic!("expected the input byte limit, got {other:?}"),
     }
-}
-
-/// Objects nested `levels` deep, each through a `serde_json::Value`-like
-/// map path (map, key, value) to use the deepest serde recursion.
-struct NestObject(u32);
-
-impl Serialize for NestObject {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(1))?;
-        if self.0 > 1 {
-            map.serialize_entry("k", &NestObject(self.0 - 1))?;
-        }
-        map.end()
-    }
-}
-
-/// The documented maximum depth fits a 1 MiB stack, half the default thread
-/// stack, so `MAX_DEPTH` is safe with room to spare.
-#[test]
-fn maximum_depth_fits_a_one_mebibyte_stack() {
-    let worker = std::thread::Builder::new()
-        .stack_size(1 << 20)
-        .spawn(|| {
-            let limits = limits(u64::MAX, Limits::MAX_DEPTH);
-            let objects = to_vec(&NestObject(Limits::MAX_DEPTH), limits).map(|bytes| bytes.len());
-            let arrays = to_vec(&Nest(Limits::MAX_DEPTH), limits).map(|bytes| bytes.len());
-            (objects.is_ok(), arrays.is_ok())
+    // At the limit the same text is read, and refused on its content.
+    assert!(matches!(
+        read(&deep.as_bytes()[..1_000], 1_000),
+        Err(ReadError::Malformed {
+            offset: 1_000,
+            kind: Malformed::UnexpectedEnd,
         })
-        .expect("spawn");
-    assert_eq!(worker.join().expect("no stack overflow"), (true, true));
+    ));
 }

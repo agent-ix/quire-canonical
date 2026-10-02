@@ -10,7 +10,7 @@ use quire_canonical::{
 };
 
 fn digest(seed: u8) -> Sha256Digest {
-    quire_canonical::sha256(&seed, quire_canonical::Limits::new(1 << 10, 8).unwrap()).unwrap()
+    quire_canonical::sha256(&seed, quire_canonical::Limits::new(1 << 10)).unwrap()
 }
 
 fn reference(

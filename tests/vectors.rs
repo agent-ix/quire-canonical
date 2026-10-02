@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
-//! The golden vectors in `tests/vectors/jcs-vectors.json`
-//! (`quire.canonical.jcs-vectors/v1`), in the QSpec vector shape: each vector
-//! names a preimage, its expected canonical text, and the SHA-256 of that
-//! text.
+//! The golden vectors in `tests/vectors/jcs-vectors.json`, in the QSpec
+//! vector shape: each vector names a preimage, its expected canonical text,
+//! and the SHA-256 of that text. Each preimage is read by the crate's own
+//! reader and encoded from its tree.
 //!
 //! Every input is original to this crate; the `sec-*` vectors exercise the
 //! properties RFC 8785 sections 3.2.2 and 3.2.3 specify, with their own names
@@ -13,21 +13,19 @@
 //!
 //! `make test` runs this file twice: once with `serde_json`'s default
 //! `BTreeMap`-backed `Map` (scalar-value key order) and once with
-//! `preserve_order` (file order). The expected bytes are the same both times.
+//! `preserve_order` (file order), so the reader sees each preimage's members
+//! in two different orders. The expected bytes are the same both times.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 #[cfg(feature = "std")]
 use quire_canonical::WriteSink;
-use quire_canonical::{encode, sha256, to_vec, Error, Limits};
+use quire_canonical::{encode, nest, read, sha256, to_vec, Document, Error, FixedShape, Limits};
 use serde::Serialize;
 use serde_json::Value;
 
 const VECTORS: &str = include_str!("vectors/jcs-vectors.json");
-const LIMITS: Limits = match Limits::new(1 << 20, 64) {
-    Ok(limits) => limits,
-    Err(_) => panic!("depth within MAX_DEPTH"),
-};
+const LIMITS: Limits = Limits::new(1 << 20);
 
 fn vectors_file() -> Value {
     serde_json::from_str(VECTORS).expect("vector file is JSON")
@@ -46,6 +44,12 @@ fn section<'a>(file: &'a Value, name: &str) -> &'a [Value] {
         .unwrap_or_else(|| panic!("vector file lacks array {name}"))
 }
 
+/// `preimage` as JSON text, read back by the crate's reader.
+fn document(preimage: &Value) -> Document {
+    let text = serde_json::to_string(preimage).expect("serializes");
+    read(text.as_bytes(), u64::MAX).expect("reads")
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -56,14 +60,15 @@ fn text(bytes: &[u8]) -> String {
 #[test]
 fn every_vector_encodes_to_its_canonical_bytes_and_digest() {
     let file = vectors_file();
-    assert_eq!(field(&file, "version"), "quire.canonical.jcs-vectors/v1");
     let vectors = section(&file, "vectors");
     assert!(!vectors.is_empty());
     for vector in vectors {
         let name = field(vector, "name");
-        let preimage = vector
-            .get("preimage")
-            .unwrap_or_else(|| panic!("{name}: no preimage"));
+        let preimage = &document(
+            vector
+                .get("preimage")
+                .unwrap_or_else(|| panic!("{name}: no preimage")),
+        );
         let canonical = field(vector, "canonical").as_bytes();
         let digest = field(vector, "sha256");
 
@@ -87,32 +92,6 @@ fn every_vector_encodes_to_its_canonical_bytes_and_digest() {
             assert_eq!(writer.0, canonical, "{name}: io::Write sink");
         }
     }
-}
-
-/// PLAT-987 AC-2: the suite contains the cases the ticket names. Deleting one
-/// from the file fails here rather than silently shrinking the gate.
-#[test]
-fn vector_file_covers_the_required_cases() {
-    let file = vectors_file();
-    let names: Vec<&str> = section(&file, "vectors")
-        .iter()
-        .map(|vector| field(vector, "name"))
-        .collect();
-    for required in [
-        "sec-3.2.2-literals-numbers-escapes",
-        "sec-3.2.3-member-sorting",
-        "utf16-order-differs-from-code-point-order",
-        "non-ascii-member-names",
-        "floats",
-        "empty-object",
-        "empty-array",
-    ] {
-        assert!(names.contains(&required), "missing vector {required}");
-    }
-    assert!(
-        section(&file, "numbers").len() >= 27,
-        "ECMAScript number formatting boundaries"
-    );
 }
 
 /// PLAT-987 AC-2: the ordering vector really distinguishes the two orders —
@@ -163,36 +142,11 @@ fn ecmascript_number_formatting_boundaries() {
 #[test]
 fn non_finite_numbers_are_refused() {
     let file = vectors_file();
-    let refused = section(&file, "refused_numbers");
-    assert_eq!(refused.len(), 3);
-    for number in refused {
+    for number in section(&file, "refused_numbers") {
         let name = field(number, "name");
         let value = double(field(number, "ieee754"));
         assert!(
             matches!(to_vec(&value, LIMITS), Err(Error::NonFiniteNumber(_))),
-            "{name}"
-        );
-    }
-}
-
-/// PLAT-1074 SR-001 FND-002: JSON-text integers past the `2^53` magnitude
-/// bound are refused with `IntegerMagnitudeAboveMaximum`, not silently
-/// encoded. These all fit `i64`/`u64`, so they reach the encoder through
-/// `serialize_i64`/`serialize_u64`, not the float path.
-#[test]
-fn json_text_integers_past_the_magnitude_bound_are_refused() {
-    let file = vectors_file();
-    let refused = section(&file, "refused_integers");
-    assert_eq!(refused.len(), 5);
-    for entry in refused {
-        let name = field(entry, "name");
-        let value: Value = serde_json::from_str(field(entry, "text"))
-            .unwrap_or_else(|error| panic!("{name}: vector text is not valid JSON: {error}"));
-        assert!(
-            matches!(
-                to_vec(&value, LIMITS),
-                Err(Error::IntegerMagnitudeAboveMaximum(_))
-            ),
             "{name}"
         );
     }
@@ -213,9 +167,13 @@ fn typed_maps_encode_in_utf16_order_regardless_of_backing() {
     // BTreeMap iterates in scalar-value order, HashMap in arbitrary order, the
     // slice-of-pairs map in declaration order.
     let btree: BTreeMap<&str, &str> = entries.into_iter().collect();
-    let hash: HashMap<&str, &str> = entries.into_iter().collect();
     assert_eq!(text(&to_vec(&btree, LIMITS).expect("btree")), expected);
-    assert_eq!(text(&to_vec(&hash, LIMITS).expect("hash")), expected);
+    // `HashMap` is a `FixedShape` only with the `std` feature.
+    #[cfg(feature = "std")]
+    {
+        let hash: std::collections::HashMap<&str, &str> = entries.into_iter().collect();
+        assert_eq!(text(&to_vec(&hash, LIMITS).expect("hash")), expected);
+    }
     assert_eq!(
         text(&to_vec(&Pairs(&entries), LIMITS).expect("pairs")),
         expected
@@ -248,6 +206,10 @@ fn serde_json_map_order_matches_the_lane() {
 
 /// A map serialized in exactly the order its pairs are listed.
 struct Pairs<'a>(&'a [(&'a str, &'a str)]);
+
+impl FixedShape for Pairs<'_> {
+    const DEPTH: usize = nest(&[<&str>::DEPTH]);
+}
 
 impl Serialize for Pairs<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

@@ -11,17 +11,14 @@
 //! for `thumbv7em-none-eabi`, a target with no `std`. The expected digest was
 //! computed by `sha256sum` over the canonical text, not by this crate.
 
-use quire_canonical::{encode, sha256, to_vec, Limits, Sink};
+use quire_canonical::{encode, read, sha256, to_vec, FixedShape, Limits, Sink};
 use serde::Serialize;
 
-const LIMITS: Limits = match Limits::new(1 << 10, 8) {
-    Ok(limits) => limits,
-    Err(_) => panic!("depth within MAX_DEPTH"),
-};
+const LIMITS: Limits = Limits::new(1 << 10);
 
 /// A preimage shaped like a compound-unit identity record. Fields are declared
 /// out of canonical order so the encoder's member sort is exercised.
-#[derive(Serialize)]
+#[derive(Serialize, FixedShape)]
 struct Preimage {
     unit: &'static str,
     b: bool,
@@ -72,4 +69,19 @@ fn a_caller_sink_receives_the_canonical_bytes() {
     let mut sink = Counting(0);
     encode(&mut sink, &PREIMAGE, LIMITS).expect("encodes");
     assert_eq!(sink.0, CANONICAL.len());
+}
+
+/// The reader and the tree encoder need nothing from `std` either.
+#[test]
+fn reads_json_and_mints_the_same_identity() {
+    let document = read(
+        br#"{"unit": "quire.value.compound-unit/v1", "b": true, "a": [1, 2.5, "x"]}"#,
+        1 << 10,
+    )
+    .expect("reads");
+    assert_eq!(to_vec(&document, LIMITS).expect("encodes"), CANONICAL);
+    assert_eq!(
+        sha256(&document, LIMITS).expect("hashes").to_string(),
+        DIGEST
+    );
 }

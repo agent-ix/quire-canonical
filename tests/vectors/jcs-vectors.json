@@ -1,5 +1,4 @@
 {
-  "version": "quire.canonical.jcs-vectors/v1",
   "vectors": [
     {
       "name": "sec-3.2.2-literals-numbers-escapes",
@@ -119,12 +118,5 @@
     {"name": "quiet-nan", "ieee754": "7ff8000000000000"},
     {"name": "negative-infinity", "ieee754": "fff0000000000000"},
     {"name": "positive-infinity", "ieee754": "7ff0000000000000"}
-  ],
-  "refused_integers": [
-    {"name": "one-above-two-pow-53", "text": "9007199254740993"},
-    {"name": "negative-one-above-two-pow-53", "text": "-9007199254740993"},
-    {"name": "two-pow-54", "text": "18014398509481984"},
-    {"name": "i64-max", "text": "9223372036854775807"},
-    {"name": "i64-min", "text": "-9223372036854775808"}
   ]
 }

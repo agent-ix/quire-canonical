@@ -15,9 +15,9 @@ use core::fmt;
 pub enum LimitKind {
     /// The number of canonical output bytes ([`crate::Limits::max_bytes`]).
     CanonicalBytes,
-    /// The number of simultaneously open arrays and objects
-    /// ([`crate::Limits::max_depth`]).
-    NestingDepth,
+    /// The number of input bytes a reader accepts (the `max_input_bytes`
+    /// of [`crate::read`]).
+    InputBytes,
     /// The bytes one open object buffers for sorting. Member offsets are
     /// 32-bit, so this bound is fixed at `u32::MAX` and only matters when
     /// [`crate::Limits::max_bytes`] is set above it.
@@ -28,7 +28,7 @@ impl fmt::Display for LimitKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::CanonicalBytes => "canonical bytes",
-            Self::NestingDepth => "nesting depth",
+            Self::InputBytes => "input bytes",
             Self::ObjectBytes => "object buffer bytes",
         })
     }
@@ -41,9 +41,9 @@ pub struct LimitExceeded {
     pub kind: LimitKind,
     /// The configured bound for that limit.
     pub bound: u64,
-    /// The amount the encoding needed when it was refused: the output length
-    /// including the bytes being written, or the depth being opened. Always
-    /// greater than `bound`.
+    /// The amount needed when it was refused: the output length including
+    /// the bytes being written, or the input length. Always greater than
+    /// `bound`.
     pub required: u64,
 }
 
@@ -59,27 +59,30 @@ impl fmt::Display for LimitExceeded {
 
 impl core::error::Error for LimitExceeded {}
 
-/// A [`crate::Limits`] that cannot be honoured.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
-#[error("max_depth {requested} is above the supported maximum {maximum}")]
-pub struct DepthAboveMaximum {
-    /// The depth asked for.
-    pub requested: u32,
-    /// [`crate::Limits::MAX_DEPTH`].
-    pub maximum: u32,
-}
-
-/// A `Serialize` implementation drove the serializer out of order. serde
-/// requires each map value to follow exactly one key; a derived `Serialize`
-/// never violates this.
+/// Events reached the [`crate::Writer`] out of order: from a caller of the
+/// event API, or from a `Serialize` implementation (serde requires each map
+/// value to follow exactly one key; a derived `Serialize` never violates
+/// this).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum ProtocolViolation {
-    /// `serialize_key` was called while the previous key still had no value.
+    /// A member name while the previous name still had no value.
     NameWithoutValue,
-    /// `serialize_value` was called with no preceding key.
+    /// A value inside an object with no preceding member name.
     ValueWithoutName,
-    /// `end` was called on a map whose last key has no value.
+    /// An object closed after a member name that has no value.
     ObjectEndedAfterName,
+    /// A member name where no object is open.
+    NameOutsideObject,
+    /// An `end_array` or `end_object` that does not match the innermost
+    /// open container, or with none open.
+    MismatchedEnd,
+    /// A second top-level value after the first was complete.
+    SecondValue,
+    /// `finish` before one complete top-level value was written.
+    Incomplete,
+    /// An event after the writer had already refused one.
+    AfterRefusal,
 }
 
 impl fmt::Display for ProtocolViolation {
@@ -88,6 +91,11 @@ impl fmt::Display for ProtocolViolation {
             Self::NameWithoutValue => "a map key was followed by another key, not a value",
             Self::ValueWithoutName => "a map value was written with no key",
             Self::ObjectEndedAfterName => "a map ended with a key that has no value",
+            Self::NameOutsideObject => "a member name was written outside an object",
+            Self::MismatchedEnd => "a container end does not match the open container",
+            Self::SecondValue => "a second top-level value was written",
+            Self::Incomplete => "the value was not complete",
+            Self::AfterRefusal => "an event followed a refused event",
         })
     }
 }
@@ -143,8 +151,7 @@ pub enum Error {
     #[cfg(feature = "std")]
     #[error("canonical output sink failed: {0}")]
     Sink(#[from] std::io::Error),
-    /// The value's `Serialize` implementation called the serializer out of
-    /// order.
+    /// Events reached the writer out of order.
     #[error("serializer protocol violation: {0}")]
     Protocol(ProtocolViolation),
     /// An invariant of the encoder itself did not hold. This is a bug in this

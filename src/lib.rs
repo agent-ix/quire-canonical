@@ -1,16 +1,42 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
 //! One streaming RFC 8785 (JSON Canonicalization Scheme) encoder that hashes
-//! as it encodes.
+//! as it encodes, and the one shared reader of untrusted JSON.
 //!
-//! Any [`serde::Serialize`] value is encoded to its RFC 8785 canonical text
-//! and fed, in order, to a [`Sink`]: a SHA-256 hasher, a byte vector, an
-//! `std::io::Write` (with the `std` feature), or a pair of them. There is no intermediate `String` of
-//! the whole text and no `serde_json::Value`.
+//! A value is encoded to its RFC 8785 canonical text and fed, in order, to a
+//! [`Sink`]: a SHA-256 hasher, a byte vector, an `std::io::Write` (with the
+//! `std` feature), or a pair of them. There is no intermediate `String` of
+//! the whole text.
+//!
+//! # Depth
+//!
+//! Nothing in this crate recurses in proportion to its input, and nothing
+//! bounds depth. The only limits are byte limits: [`Limits::max_bytes`] on
+//! canonical output and the input byte limit of [`read`]. Every heap stack
+//! the crate grows is bounded by one of them. A value reaches the encoder by
+//! one of three paths:
+//!
+//! * [`Writer`], the push-event API: the caller pushes `begin_array`, `name`,
+//!   `string`, `end_object` and so on from its own explicit stack. This is
+//!   the path for data whose depth follows its input.
+//! * [`Document`], the arena tree [`read`] produces, encodes itself through
+//!   the [`Writer`] from an explicit heap stack.
+//! * A [`FixedShape`] type encodes through its serde `Serialize`. serde
+//!   recurses once per nesting level, so only types whose depth is fixed by
+//!   their schema may take this path. `#[derive(FixedShape)]` computes
+//!   [`FixedShape::DEPTH`] from every field's `DEPTH`, so a recursive type
+//!   refers to its own `DEPTH` and rustc refuses the cycle at compile time.
+//!   A hand-written impl gets that check only if it computes `DEPTH` the same
+//!   way; a literal `DEPTH` defeats it (see [`FixedShape`]).
+//!
+//! [`encode`], [`to_vec`], [`sha256`] and [`sha256_with_domain`] accept any
+//! [`Encode`] value: a [`FixedShape`] type, a [`Document`] or [`NodeRef`], or
+//! a caller's own event source.
+//!
+//! # Encoding rules
 //!
 //! * Member names are ordered by UTF-16 code unit (RFC 8785 §3.2.3) by the
-//!   encoder itself, so the bytes do not depend on how a map type is backed,
-//!   nor on `serde_json`'s `preserve_order` feature.
+//!   encoder itself, so the bytes do not depend on how a map type is backed.
 //! * Numbers use ECMAScript `Number::toString` (§3.2.2.3). A Rust integer
 //!   type (`i8`..`i128`, `u8`..`u128`) is encoded by its IEEE 754 double value
 //!   and refused, naming the value, if its magnitude exceeds `2^53`
@@ -18,36 +44,35 @@
 //!   holds exactly as a double. There is no mode that accepts a larger
 //!   integer; an exact integer past that bound must travel as a decimal
 //!   string instead. This bound is on the Rust value the encoder receives,
-//!   not on JSON text: a JSON integer literal already too large for `i64`/
-//!   `u64` (e.g. via `serde_json`) is parsed to an `f64` before it ever
-//!   reaches this crate, and is encoded as the plain double it already is.
-//!   An `f32` is widened to the `f64` with the same value, so `0.1_f32`
-//!   encodes as `0.10000000149011612` (serde_json prints `0.1`); encode an
-//!   `f64` when the decimal spelling is what is meant.
+//!   not on JSON text: a JSON number read by [`read`] is the double its text
+//!   denotes, and is encoded as that double. An `f32` is widened to the `f64`
+//!   with the same value, so `0.1_f32` encodes as `0.10000000149011612`;
+//!   encode an `f64` when the decimal spelling is what is meant.
 //! * Strings are escaped as §3.2.2.2 requires, with no Unicode normalization.
-//! * Every encoding runs under explicit [`Limits`]. Reaching one refuses the
-//!   encoding with [`Error::Limit`], naming the limit kind and bound; the
-//!   encoder never returns truncated output as success.
+//! * Reaching a limit refuses the encoding with [`Error::Limit`], naming the
+//!   limit kind and bound; the encoder never returns truncated output as
+//!   success.
 //!
 //! # Streaming and memory
 //!
 //! Arrays, strings and scalars stream straight to the sink. An object's
-//! members must be sorted, so each open object buffers its members' canonical
-//! bytes until it closes; a top-level object therefore reaches the sink only
-//! when it is complete. Buffered bytes are canonical output and count against
+//! members must be sorted, so while any object is open its canonical bytes
+//! are buffered; a top-level object therefore reaches the sink only when it
+//! is complete. Buffered bytes are canonical output and count against
 //! [`Limits::max_bytes`]; on top of that come 8 bytes of offsets per buffered
-//! member, `Vec` growth slack, and a transient copy while a closing object
-//! moves into its parent. `tests/memory.rs` holds the measured peak heap for
-//! a flat object of small members under 4x the canonical length.
+//! member, small records per open and nested object, and `Vec` growth slack
+//! (see [`Writer`]). `tests/memory.rs` measures the peak heap per shape: under
+//! 4x the canonical length for flat objects and objects of objects, and under
+//! 32x for a deep chain of objects, the worst shape per byte. [`read`] peaks
+//! under 64x its input length.
 //!
 //! ```
-//! use quire_canonical::{to_vec, Limits};
+//! use quire_canonical::{to_vec, FixedShape, Limits};
 //!
-//! #[derive(serde::Serialize)]
+//! #[derive(serde::Serialize, FixedShape)]
 //! struct Example { b: f64, a: &'static str }
 //!
-//! let limits = Limits::new(1024, 16).expect("depth within MAX_DEPTH");
-//! let bytes = to_vec(&Example { b: 1e21, a: "ö" }, limits)?;
+//! let bytes = to_vec(&Example { b: 1e21, a: "ö" }, Limits::new(1024))?;
 //! assert_eq!(bytes, "{\"a\":\"ö\",\"b\":1e+21}".as_bytes());
 //! # Ok::<(), quire_canonical::Error>(())
 //! ```
@@ -66,58 +91,46 @@ mod escape;
 mod identity;
 mod number;
 mod order;
+mod read;
+mod shape;
 mod sink;
+mod writer;
 
 use alloc::vec::Vec;
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
+
 use sha2::{Digest as _, Sha256};
 
-pub use crate::error::{DepthAboveMaximum, Error, LimitExceeded, LimitKind, ProtocolViolation};
+pub use crate::error::{Error, LimitExceeded, LimitKind, ProtocolViolation};
 pub use crate::identity::{
     AuthorityDigest, AuthorityIdentity, AuthorityQualifiedSubjectReference, DigestDomain,
     IdentityError, ObjectIdentity, Revision, SemanticComparisonRefusal, SubjectKind,
 };
+pub use crate::read::{
+    read, Document, Items, Malformed, Members, Node, NodeRef, Number, ReadError,
+};
+pub use crate::shape::{deepest, nest, FixedShape};
 pub use crate::sink::Sink;
 #[cfg(feature = "std")]
 pub use crate::sink::WriteSink;
+pub use crate::writer::Writer;
+/// `#[derive(FixedShape)]`: computes `DEPTH` from every field's `DEPTH`.
+pub use quire_canonical_derive::FixedShape;
 
-/// The explicit bounds every encoding runs under.
+/// The explicit bounds every encoding runs under: a canonical byte ceiling,
+/// and nothing else. Depth is not a limit; it costs bytes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Limits {
     max_bytes: u64,
-    max_depth: u32,
 }
 
 impl Limits {
-    /// The deepest nesting a [`Limits`] may allow.
-    ///
-    /// serde drives serialization by recursion, one set of native stack
-    /// frames per nesting level, so the depth limit is also the stack budget.
-    /// `tests/limits.rs` encodes this depth of nested objects on a 1 MiB
-    /// thread stack in a debug build; the default thread stack is 2 MiB.
-    pub const MAX_DEPTH: u32 = 576;
-
-    /// Refuse an encoding whose canonical text would exceed `max_bytes` bytes,
-    /// or that opens more than `max_depth` nested arrays and objects.
-    ///
-    /// # Errors
-    ///
-    /// [`DepthAboveMaximum`] when `max_depth` exceeds [`Limits::MAX_DEPTH`].
-    /// The depth is refused rather than clamped, so the limit in force is
-    /// always the one the caller wrote.
-    pub const fn new(max_bytes: u64, max_depth: u32) -> Result<Self, DepthAboveMaximum> {
-        if max_depth > Self::MAX_DEPTH {
-            return Err(DepthAboveMaximum {
-                requested: max_depth,
-                maximum: Self::MAX_DEPTH,
-            });
-        }
-        Ok(Self {
-            max_bytes,
-            max_depth,
-        })
+    /// Refuse an encoding whose canonical text would exceed `max_bytes` bytes.
+    #[must_use]
+    pub const fn new(max_bytes: u64) -> Self {
+        Self { max_bytes }
     }
 
     /// The canonical byte ceiling. Bytes buffered for sorting are canonical
@@ -127,11 +140,25 @@ impl Limits {
     pub const fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
+}
 
-    /// The nesting-depth ceiling.
-    #[must_use]
-    pub const fn max_depth(&self) -> u32 {
-        self.max_depth
+/// A value that writes itself into a [`Writer`] as exactly one JSON value.
+///
+/// Every [`FixedShape`] type is one, through its serde encoding, and so are
+/// [`Document`] and [`NodeRef`]. Implement it for a type whose depth follows
+/// its input by pushing events from an explicit stack, never by recursion.
+pub trait Encode {
+    /// Push this value's events into `writer`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the writer refuses.
+    fn encode_into<S: Sink + ?Sized>(&self, writer: &mut Writer<'_, S>) -> Result<(), Error>;
+}
+
+impl<T: FixedShape + ?Sized> Encode for T {
+    fn encode_into<S: Sink + ?Sized>(&self, writer: &mut Writer<'_, S>) -> Result<(), Error> {
+        writer.serialize(self)
     }
 }
 
@@ -168,11 +195,11 @@ impl fmt::Display for Sha256Digest {
 pub fn encode<S, T>(sink: &mut S, value: &T, limits: Limits) -> Result<u64, Error>
 where
     S: Sink + ?Sized,
-    T: Serialize + ?Sized,
+    T: Encode + ?Sized,
 {
-    let mut encoder = encoder::Encoder::new(sink, limits);
-    value.serialize(&mut encoder)?;
-    Ok(encoder.produced())
+    let mut writer = Writer::new(sink, limits);
+    value.encode_into(&mut writer)?;
+    writer.finish()
 }
 
 /// The RFC 8785 canonical bytes of `value`.
@@ -180,7 +207,7 @@ where
 /// # Errors
 ///
 /// As [`encode`]. No bytes are returned on error.
-pub fn to_vec<T: Serialize + ?Sized>(value: &T, limits: Limits) -> Result<Vec<u8>, Error> {
+pub fn to_vec<T: Encode + ?Sized>(value: &T, limits: Limits) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     encode(&mut bytes, value, limits)?;
     Ok(bytes)
@@ -192,7 +219,7 @@ pub fn to_vec<T: Serialize + ?Sized>(value: &T, limits: Limits) -> Result<Vec<u8
 /// # Errors
 ///
 /// As [`encode`]. No digest is returned on error.
-pub fn sha256<T: Serialize + ?Sized>(value: &T, limits: Limits) -> Result<Sha256Digest, Error> {
+pub fn sha256<T: Encode + ?Sized>(value: &T, limits: Limits) -> Result<Sha256Digest, Error> {
     let mut hasher = Sha256::new();
     encode(&mut hasher, value, limits)?;
     Ok(Sha256Digest(hasher.finalize().into()))
@@ -210,7 +237,7 @@ pub fn sha256<T: Serialize + ?Sized>(value: &T, limits: Limits) -> Result<Sha256
 /// # Errors
 ///
 /// As [`encode`]. No digest is returned on error.
-pub fn sha256_with_domain<T: Serialize + ?Sized>(
+pub fn sha256_with_domain<T: Encode + ?Sized>(
     domain: &[u8],
     value: &T,
     limits: Limits,

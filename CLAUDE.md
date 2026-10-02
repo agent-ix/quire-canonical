@@ -37,9 +37,14 @@ make ci             # fmt-check + lint + test + build-no-std + deny + audit-unsa
 
 ```
 src/lib.rs             # crate root
+quire-canonical-derive/ # #[derive(FixedShape)] proc-macro crate (workspace member)
 tests/vectors.rs       # golden vectors (tests/vectors/jcs-vectors.json)
-tests/limits.rs        # byte and depth limits
-tests/encode.rs        # serde data model mapping and refusals
+tests/limits.rs        # byte limits and the heap stacks they bound
+tests/depth.rs         # 100,000-deep values on a 512 KiB stack
+tests/read.rs          # the shared JSON reader and its refusals
+tests/encode.rs        # serde data model mapping, event API and refusals
+tests/derive.rs        # #[derive(FixedShape)]; a recursive type fails with E0391
+tests/memory.rs        # peak heap per shape, writer and reader
 benches/               # criterion benchmarks (opt-in; add criterion to dev-deps)
 spec/                  # requirements artifacts (from /spec-create-spec)
 scripts/               # local tooling

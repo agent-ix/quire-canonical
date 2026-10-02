@@ -16,12 +16,10 @@
 //! value.
 //!
 //! This bound is enforced only for Rust integer types (`i8`..`i128`,
-//! `u8`..`u128`) reaching the encoder through its `serialize_i*`/
-//! `serialize_u*` methods. A JSON-text integer already too large for
-//! `u64`/`i64` is not one of these: `serde_json` itself parses it straight to
-//! an `f64` (`serde_json::Number::Float`), so it reaches this crate as a
-//! double and is encoded as one, like any other float — see
-//! `tests/encode.rs` for the pinned behaviour.
+//! `u8`..`u128`) reaching the encoder through `Writer::integer` or serde's
+//! `serialize_i*`/`serialize_u*` methods. A JSON-text integer read by the
+//! reader is not one of these: it is the double its text denotes, and is
+//! encoded as one, like any other number — see `tests/read.rs`.
 
 use crate::Error;
 

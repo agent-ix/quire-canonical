@@ -9,6 +9,12 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/agent-ix/quire-canonical"
 publish = false
 
+[workspace]
+members = [".", "quire-canonical-derive"]
+# Plain `cargo` commands (the Makefile's lint, test and build lanes) cover
+# the derive crate as well as the library.
+default-members = [".", "quire-canonical-derive"]
+
 [lib]
 name = "quire_canonical"
 path = "src/lib.rs"
@@ -26,6 +32,7 @@ std = ["serde/std", "sha2/std"]
 test-preserve-order = ["dep:serde_json", "serde_json/preserve_order"]
 
 [dependencies]
+quire-canonical-derive = { path = "quire-canonical-derive" }
 ryu-js = "1"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 sha2 = { version = "0.10", default-features = false }
