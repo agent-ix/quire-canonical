@@ -11,6 +11,7 @@ let limits = Limits::new(1 << 20);           // canonical byte ceiling; no depth
 let bytes = to_vec(&fixed_shape_value, limits)?; // a `FixedShape` type, through serde
 let document = read(json_bytes, 1 << 20)?;   // untrusted JSON into an arena tree
 let digest = sha256(&document, limits)?;     // hashed while encoding
+let bytes = to_vec(&json_value, limits)?;    // a serde_json::Value (`serde_json` feature)
 
 let mut writer = Writer::new(&mut sink, limits); // push events from your own stack
 writer.begin_array()?;
@@ -21,8 +22,9 @@ writer.finish()?;
 
 Nothing recurses in proportion to its input and nothing bounds depth: only
 byte limits apply. A value reaches the encoder through the `Writer` event API
-(data whose depth follows its input), as a `Document` from the reader, or
-through serde for a `FixedShape` type, whose depth is fixed by its schema.
+(data whose depth follows its input), as a `Document` from the reader, as a
+`serde_json::Value` (with the `serde_json` feature), or through serde for a
+`FixedShape` type, whose depth is fixed by its schema.
 `#[derive(FixedShape)]` computes `DEPTH` from every field's `DEPTH`, so a
 recursive type that derives it is a compile-time cycle (E0391). A hand-written
 impl gets the same check only if its `DEPTH` is `nest` over every field's
@@ -41,6 +43,14 @@ The crate is `no_std` + `alloc`. The default `std` feature adds only
 `Vec<u8>` or a hasher, `to_vec`, `sha256`, `sha256_with_domain`, the
 `Writer` and the reader all work without `std`. `make build-no-std` builds
 that configuration for `thumbv7em-none-eabi`.
+
+The `serde_json` feature, off by default, implements `Encode` for
+`serde_json::Value`. The value walks itself from an explicit heap stack and
+pushes `Writer` events, so a value of any depth encodes on any thread stack.
+Integers go through the integer rules and are refused past 2^53; floats get
+ECMAScript number text. serde_json is built with only its `alloc` feature, so
+this works without `std` as well. serde_json's own `Drop` for `Value` recurses
+once per level, so whoever owns a deep `Value` must drop it from a heap stack.
 
 Arrays and scalars stream to the sink. While any object is open its canonical
 bytes are buffered, so its members can be sorted; a top-level object is
