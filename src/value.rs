@@ -30,10 +30,17 @@ enum Open<'v> {
 /// * Members are pushed in the order the [`serde_json::Map`] iterates, which
 ///   depends on serde_json's `preserve_order` feature. The [`Writer`] sorts
 ///   them by UTF-16 code unit, so the bytes do not depend on it.
-/// * An integer (`Number::as_i64` or `Number::as_u64`) goes through
+/// * A number serde_json holds as an integer (`Number::as_i64` or
+///   `Number::as_u64`, from `-2^63` to `2^64 - 1`) goes through
 ///   [`Writer::integer`], and is refused past `2^53` like any Rust integer.
-///   A float goes through [`Writer::number`]. serde_json holds no NaN or
-///   infinity in a `Value`.
+///   This differs from [`crate::read`], which encodes every JSON number as
+///   the double its text denotes: the literal `9007199254740993` is refused
+///   here and encodes as `9007199254740992` there. An integer literal past
+///   the 64-bit range is a float to serde_json, so it encodes as its double
+///   here too (`18446744073709551617` as `18446744073709552000`), unless
+///   `arbitrary_precision` is on (below).
+/// * A float goes through [`Writer::number`]. Without `arbitrary_precision`
+///   serde_json holds no NaN or infinity in a `Value`.
 /// * With serde_json's `arbitrary_precision`, which feature unification
 ///   turns on for every crate in a build once any crate enables it, a
 ///   `Number` is its literal text. serde_json's own `as_i64`, `as_u64` and

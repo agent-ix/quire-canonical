@@ -48,7 +48,10 @@
 //!   integer; an exact integer past that bound must travel as a decimal
 //!   string instead. This bound is on the Rust value the encoder receives,
 //!   not on JSON text: a JSON number read by [`read`] is the double its text
-//!   denotes, and is encoded as that double. An `f32` is widened to the `f64`
+//!   denotes, and is encoded as that double. A `serde_json::Value` number
+//!   held as an `i64` or `u64` is a Rust integer in this sense, so the same
+//!   JSON text can be refused through a `Value` and encoded through [`read`].
+//!   An `f32` is widened to the `f64`
 //!   with the same value, so `0.1_f32` encodes as `0.10000000149011612`;
 //!   encode an `f64` when the decimal spelling is what is meant.
 //! * Strings are escaped as §3.2.2.2 requires, with no Unicode normalization.

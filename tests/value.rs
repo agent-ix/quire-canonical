@@ -247,6 +247,61 @@ fn integers_past_two_pow_53_are_refused() {
     }
 }
 
+/// A `Value`'s integers follow the integer rule, not `read`'s rule for JSON
+/// text. A literal serde_json holds as an `i64` or `u64` past `2^53` is
+/// refused through a `Value`, while `read` encodes its double. A literal past
+/// the 64-bit range is a float to serde_json and encodes as its double
+/// through both, except with `arbitrary_precision`, where the `Value` path
+/// keeps it an integer and refuses it.
+#[test]
+fn integer_literals_follow_the_integer_rule_only_within_64_bits() {
+    for (text, refused, double) in [
+        (
+            "9007199254740993",
+            9_007_199_254_740_993_i128,
+            "9007199254740992",
+        ),
+        (
+            "-9007199254740993",
+            -9_007_199_254_740_993,
+            "-9007199254740992",
+        ),
+        (
+            "18446744073709551615",
+            i128::from(u64::MAX),
+            "18446744073709552000",
+        ),
+        (
+            "-9223372036854775808",
+            i128::from(i64::MIN),
+            "-9223372036854776000",
+        ),
+    ] {
+        let value: Value = serde_json::from_str(text).expect("parses");
+        match to_vec(&value, LIMITS) {
+            Err(Error::IntegerMagnitudeAboveMaximum(found)) => assert_eq!(found, refused),
+            other => panic!("{text}: expected refusal, got {other:?}"),
+        }
+        assert_eq!(read_canonical(text), double, "{text}");
+    }
+    for (text, double) in [
+        ("18446744073709551616", "18446744073709552000"),
+        ("-9223372036854775809", "-9223372036854776000"),
+        ("100000000000000000001", "100000000000000000000"),
+    ] {
+        let value: Value = serde_json::from_str(text).expect("parses");
+        if arbitrary_precision() {
+            match to_vec(&value, LIMITS) {
+                Err(Error::WideIntegerMagnitudeAboveMaximum(found)) => assert_eq!(found, text),
+                other => panic!("{text}: expected refusal, got {other:?}"),
+            }
+        } else {
+            assert_eq!(canonical(&value), double, "{text}");
+        }
+        assert_eq!(read_canonical(text), double, "{text}");
+    }
+}
+
 /// Without serde_json's `arbitrary_precision` feature a `Value` cannot hold a
 /// non-finite number or an integer too wide for 64 bits. With it, both can be
 /// built, and both are refused: the infinite literal as a non-finite number,

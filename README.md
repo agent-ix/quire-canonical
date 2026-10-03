@@ -47,14 +47,24 @@ that configuration for `thumbv7em-none-eabi`.
 The `serde_json` feature, off by default, implements `Encode` for
 `serde_json::Value`. The value walks itself from an explicit heap stack and
 pushes `Writer` events, so a value of any depth encodes on any thread stack.
-Integers go through the integer rules and are refused past 2^53; floats get
-ECMAScript number text. serde_json is built with `alloc` rather than `std`,
-so this works without `std` as well, and with `float_roundtrip`, so a float
-literal parses to its nearest double and gives the same bytes through a
-`Value` as through `read`. Feature unification turns `float_roundtrip` on for
-every crate in a build that enables this feature. serde_json's own `Drop` for `Value` recurses
-once per level, so whoever owns a deep `Value` drops it with
-`quire_canonical::drop_value`, which uses a heap stack instead.
+serde_json is built with `alloc` rather than `std`, so this works without
+`std`, and with `float_roundtrip`, so a float literal parses to its nearest
+double and gives the same bytes through a `Value` as through `read` (feature
+unification turns `float_roundtrip` on for every crate in a build that
+enables this feature). serde_json's own `Drop` for `Value` recurses once per
+level, so whoever owns a deep `Value` drops it with
+`quire_canonical::drop_value`, which uses a heap stack.
+
+A `Value`'s integers follow the integer rule, not `read`'s rule for JSON
+text. A number serde_json holds as an `i64` or `u64` (from -2^63 to
+2^64 - 1) is refused past 2^53, while `read` encodes every JSON number as
+the double its text denotes: the literal `9007199254740993` is refused
+through a `Value` and encodes as `9007199254740992` through `read`. An
+integer literal past the 64-bit range is a float to serde_json, so it
+encodes as its double through both, unless serde_json's
+`arbitrary_precision` is on anywhere in the build: then a `Number` keeps its
+literal text, and the `Value` path refuses such an integer instead. Floats
+get ECMAScript number text.
 
 Arrays and scalars stream to the sink. While any object is open its canonical
 bytes are buffered, so its members can be sorted; a top-level object is
