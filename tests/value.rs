@@ -4,9 +4,10 @@
 //! feature): the same bytes as the serde path and the golden vectors, any
 //! depth on a small thread stack, the numbers it refuses, and `drop_value`.
 //!
-//! `make test` runs this file twice: with serde_json's default
-//! `BTreeMap`-backed `Map`, and with `preserve_order`, where a map iterates in
-//! insertion order and the encoder alone puts members in canonical order.
+//! `make test` runs this file three times: with serde_json's default
+//! `BTreeMap`-backed `Map`; with `preserve_order`, where a map iterates in
+//! insertion order and the encoder alone puts members in canonical order;
+//! and with `arbitrary_precision`, where a `Number` is its literal text.
 
 #![cfg(feature = "serde_json")]
 

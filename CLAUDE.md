@@ -18,7 +18,7 @@ version they ran.
 make fmt            # format with rustfmt
 make fmt-check      # verify formatting (CI gate)
 make lint           # clippy with -D warnings
-make test           # cargo test: default (+serde_json feature), serde_json/preserve_order and --no-default-features lanes
+make test           # cargo test: default (+serde_json feature), serde_json/preserve_order, --no-default-features and serde_json/arbitrary_precision (tests/value.rs) lanes
 make build-no-std   # build without std for thumbv7em-none-eabi, with and without serde_json (proves no_std + alloc)
 make build          # release build
 make clean          # cargo clean
