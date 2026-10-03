@@ -11,7 +11,9 @@
 
 #![cfg(feature = "serde_json")]
 
-use quire_canonical::{drop_value, read, sha256, to_vec, Error, FixedShape, Limits};
+use quire_canonical::{
+    drop_value, read, sha256, to_vec, Error, FixedShape, LimitExceeded, LimitKind, Limits,
+};
 use serde::Serialize;
 use serde_json::{json, Map, Number, Value};
 
@@ -228,6 +230,29 @@ fn drop_value_drops_100000_deep_values_on_a_64_kib_stack() {
         drop_value(deep_array());
         drop_value(deep_object());
     });
+}
+
+/// The walk's stack follows the bytes it has produced, and the output is
+/// bounded by the byte ceiling: a 5,000-deep array under a 4,999-byte
+/// ceiling is refused on bytes, never truncated, and fits under 10,000.
+#[test]
+fn deep_value_encoding_is_refused_on_bytes() {
+    let mut value = Value::Array(Vec::new());
+    for _ in 1..5_000 {
+        value = Value::Array(vec![value]);
+    }
+    let refused = to_vec(&value, Limits::new(4_999));
+    let fits = to_vec(&value, Limits::new(10_000));
+    drop_value(value);
+    assert!(matches!(
+        refused,
+        Err(Error::Limit(LimitExceeded {
+            kind: LimitKind::CanonicalBytes,
+            bound: 4_999,
+            required: 5_000,
+        }))
+    ));
+    assert_eq!(fits.expect("fits").len(), 10_000);
 }
 
 /// An integer past `2^53`, from an `i64` or a `u64`, at the top level or
