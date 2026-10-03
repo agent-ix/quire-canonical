@@ -155,14 +155,15 @@ fn float_literals_give_the_same_bytes_through_a_value_as_through_read() {
     }
 }
 
-/// Run `work` on a thread with a 64 KiB stack.
+/// Run `work` on a thread with a 64 KiB stack. A stack overflow there aborts
+/// the whole test process; `join` fails only if `work` panicked.
 fn on_small_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .stack_size(SMALL_STACK)
         .spawn(work)
         .expect("spawn")
         .join()
-        .expect("no stack overflow")
+        .expect("small-stack worker panicked")
 }
 
 /// `DEEP` nested arrays, built from the inside out without recursion.
@@ -187,15 +188,17 @@ fn deep_object() -> Value {
 }
 
 /// Build, encode and drop a value on a 64 KiB stack; return its bytes. The
-/// value goes through `drop_value`: serde_json's own `Drop` would overflow.
+/// value goes through `drop_value` before the outcome leaves the thread, so a
+/// refusal never unwinds through serde_json's recursive `Drop`, which would
+/// overflow the small stack.
 fn encode_on_small_stack(build: fn() -> Value) -> String {
-    let bytes = on_small_stack(move || {
+    let encoded = on_small_stack(move || {
         let value = build();
-        let bytes = to_vec(&value, Limits::new(u64::MAX)).expect("encodes at any depth");
+        let encoded = to_vec(&value, Limits::new(u64::MAX));
         drop_value(value);
-        bytes
+        encoded
     });
-    String::from_utf8(bytes).expect("UTF-8")
+    String::from_utf8(encoded.expect("encodes at any depth")).expect("UTF-8")
 }
 
 /// A 100,000-deep array encodes on a 64 KiB stack, where a walk that
