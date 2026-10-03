@@ -37,7 +37,9 @@ the stack through serde.
 `WriteSink<impl io::Write>`, or a pair of sinks). Member names are sorted by
 UTF-16 code unit by the encoder, so output does not depend on map backing. A
 limit refuses the encoding; it never truncates. The reader refuses malformed
-input with the byte offset of the fault, and an over-long input with its byte
+input with the byte offset of the fault (a number with no finite double,
+such as `1e400`, also carries its RFC 6901 JSON pointer and exact source
+text, in `ReadError::NumberOutOfRange`), and an over-long input with its byte
 limit, which is never reported as malformed input.
 
 The crate is `no_std` + `alloc`. The default `std` feature adds only

@@ -32,7 +32,8 @@
 //! # What it accepts
 //!
 //! Exactly one JSON value, surrounded by optional JSON whitespace, as UTF-8.
-//! It refuses, with the byte offset where the fault starts:
+//! It refuses, with the byte offset where the fault starts (a number with no
+//! finite double also carries its JSON pointer and source text):
 //!
 //! * text that is not UTF-8, and a byte order mark;
 //! * a lone surrogate escape such as `"\ud800"`, which has no UTF-8 form;
@@ -50,7 +51,7 @@ use core::fmt;
 use crate::{Encode, Error, LimitExceeded, LimitKind, Sink, Writer};
 
 /// Why [`read`] refused its input.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReadError {
     /// The input is longer than the caller's input byte limit
@@ -65,6 +66,22 @@ pub enum ReadError {
         offset: usize,
         /// What is wrong there.
         kind: Malformed,
+    },
+    /// A number whose value has no finite IEEE 754 double, such as `1e400`.
+    ///
+    /// The number is identified by where it sits and by its source text, so a
+    /// caller can classify it: a whole value beyond +-2^53, exponent forms
+    /// included, is an inexact integer; any other is an inexact number.
+    #[error("number {lexeme} at {pointer:?} (byte {offset}) has no finite IEEE 754 double")]
+    NumberOutOfRange {
+        /// The byte offset of the number's first byte.
+        offset: usize,
+        /// The number's location as an RFC 6901 JSON pointer (`/n`, `/0`,
+        /// `~0` for `~` and `~1` for `/` in member names); empty for a
+        /// top-level number.
+        pointer: String,
+        /// The number's exact source text, such as `-1e400`.
+        lexeme: String,
     },
     /// A heap reservation for the tree failed.
     #[error("allocation of {requested} bytes for the JSON tree failed")]
@@ -92,8 +109,6 @@ pub enum Malformed {
     LoneSurrogate,
     /// A number that does not follow the RFC 8259 number grammar.
     InvalidNumber,
-    /// A number whose value has no finite IEEE 754 double.
-    NumberOutOfRange,
     /// A member name already used earlier in the same object.
     DuplicateName,
     /// Content after the one top-level value.
@@ -110,7 +125,6 @@ impl fmt::Display for Malformed {
             Self::InvalidEscape => "invalid escape",
             Self::LoneSurrogate => "lone surrogate escape",
             Self::InvalidNumber => "invalid number",
-            Self::NumberOutOfRange => "number has no finite IEEE 754 double",
             Self::DuplicateName => "duplicate member name",
             Self::TrailingContent => "content after the JSON value",
         })
@@ -516,6 +530,17 @@ fn reserve<T>(vector: &mut Vec<T>, additional: usize) -> Result<(), ReadError> {
         })
 }
 
+/// An owned copy of `text`, reserved fallibly.
+fn owned(text: &str) -> Result<String, ReadError> {
+    let mut copy = String::new();
+    copy.try_reserve(text.len())
+        .map_err(|_| ReadError::Allocation {
+            requested: text.len(),
+        })?;
+    copy.push_str(text);
+    Ok(copy)
+}
+
 fn push<T>(vector: &mut Vec<T>, value: T) -> Result<(), ReadError> {
     reserve(vector, 1)?;
     vector.push(value);
@@ -548,6 +573,86 @@ impl<'i> Parser<'i> {
 
     fn malformed(&self, offset: usize, kind: Malformed) -> ReadError {
         ReadError::Malformed { offset, kind }
+    }
+
+    /// The refusal for the number `literal` at `offset`, with its JSON pointer.
+    fn number_out_of_range(&self, offset: usize, literal: &str) -> ReadError {
+        match self
+            .pointer()
+            .and_then(|pointer| Ok((pointer, owned(literal)?)))
+        {
+            Ok((pointer, lexeme)) => ReadError::NumberOutOfRange {
+                offset,
+                pointer,
+                lexeme,
+            },
+            Err(error) => error,
+        }
+    }
+
+    /// The RFC 6901 pointer of the value being read, from the open containers.
+    fn pointer(&self) -> Result<String, ReadError> {
+        enum Step {
+            Index(usize),
+            Name(Range),
+        }
+        // Walk innermost out. Open arrays share `scratch_items` and open
+        // objects share `scratch_members`, each container's children starting
+        // at its `start`, so a container's children end where the next open
+        // container of the same kind begins.
+        let mut steps = Vec::new();
+        let mut items_end = self.scratch_items.len();
+        let mut members_end = self.scratch_members.len();
+        for open in self.stack.iter().rev() {
+            if open.object {
+                let member = members_end
+                    .checked_sub(1)
+                    .and_then(|index| self.scratch_members.get(index));
+                if let Some(member) = member {
+                    push(&mut steps, Step::Name(member.name))?;
+                }
+                members_end = open.start;
+            } else {
+                push(
+                    &mut steps,
+                    Step::Index(items_end.saturating_sub(open.start)),
+                )?;
+                items_end = open.start;
+            }
+        }
+        let mut pointer = String::new();
+        // Escaping only grows a name, by at most twice.
+        pointer
+            .try_reserve(
+                self.text
+                    .len()
+                    .saturating_mul(2)
+                    .saturating_add(steps.len() * 21),
+            )
+            .map_err(|_| ReadError::Allocation {
+                requested: self.text.len(),
+            })?;
+        for step in steps.iter().rev() {
+            pointer.push('/');
+            match step {
+                Step::Index(index) => {
+                    use core::fmt::Write as _;
+                    // Writing to a String reserved above cannot fail.
+                    let _ = write!(pointer, "{index}");
+                }
+                Step::Name(range) => {
+                    let name = self.text.get(range.start..range.end).unwrap_or_default();
+                    for character in name.chars() {
+                        match character {
+                            '~' => pointer.push_str("~0"),
+                            '/' => pointer.push_str("~1"),
+                            other => pointer.push(other),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(pointer)
     }
 
     fn peek(&self) -> Option<u8> {
@@ -936,7 +1041,7 @@ impl<'i> Parser<'i> {
         let literal = self.source.get(start..self.position).unwrap_or_default();
         let value: f64 = literal.parse().map_err(|_| invalid(self))?;
         if !value.is_finite() {
-            return Err(self.malformed(start, Malformed::NumberOutOfRange));
+            return Err(self.number_out_of_range(start, literal));
         }
         let text_start = self.text.len();
         self.text.push_str(literal);

@@ -39,11 +39,60 @@ fn surrogate_pair_decodes() {
     assert_eq!(canonical(r#""\ud834\udd1e""#), "\"\u{1d11e}\"");
 }
 
-/// FR-259: a number with no finite double is refused at its first byte.
+/// The pointer and lexeme of a number refused for having no finite double.
+fn out_of_range(text: &str) -> (usize, String, String) {
+    match read(text.as_bytes(), u64::MAX) {
+        Err(ReadError::NumberOutOfRange {
+            offset,
+            pointer,
+            lexeme,
+        }) => (offset, pointer, lexeme),
+        other => panic!("{text:?}: expected an out-of-range refusal, got {other:?}"),
+    }
+}
+
+/// QSL-219: a number with no finite double is refused at its first byte,
+/// with its JSON pointer and exact source text.
 #[test]
-fn number_out_of_double_range_is_refused_at_its_offset() {
-    assert_eq!(refusal(r#"{"n": 1e400}"#), (6, Malformed::NumberOutOfRange));
-    assert_eq!(refusal("[-1e400]"), (1, Malformed::NumberOutOfRange));
+fn number_out_of_double_range_carries_pointer_and_lexeme() {
+    let found = |offset: usize, pointer: &str, lexeme: &str| {
+        (offset, pointer.to_owned(), lexeme.to_owned())
+    };
+    assert_eq!(out_of_range(r#"{"n": 1e400}"#), found(6, "/n", "1e400"));
+    assert_eq!(out_of_range("[-1e400]"), found(1, "/0", "-1e400"));
+    assert_eq!(out_of_range("1e400"), found(0, "", "1e400"));
+    assert_eq!(out_of_range("[0, 1, 1.5E+999]"), found(7, "/2", "1.5E+999"));
+    // Member names are unescaped, then escaped as RFC 6901: `~` and `/`.
+    assert_eq!(
+        out_of_range(r#"{"a/b": [1, {"~x\u002f": [[], -1e400]}]}"#),
+        found(30, "/a~1b/1/~0x~1/1", "-1e400")
+    );
+    // An earlier sibling container does not shift the index or the name.
+    assert_eq!(
+        out_of_range(r#"{"p": {"q": 1}, "r": [[2], 1e400]}"#),
+        found(27, "/r/1", "1e400")
+    );
+}
+
+/// QSL-219: `1e-400` underflows to 0.0, which is finite, so it is accepted
+/// and keeps its source text. QSL classifies it on its side.
+#[test]
+fn number_underflow_is_accepted_with_its_text() {
+    let document = read(b"[1e-400, -1e-400]", u64::MAX).expect("reads");
+    assert_eq!(canonical("[1e-400]"), "[0]");
+    let Node::Array(items) = document.root().node() else {
+        panic!("array root");
+    };
+    let numbers: Vec<(&str, f64)> = items
+        .map(|item| match item.node() {
+            Node::Number(number) => (number.text(), number.value()),
+            other => panic!("expected a number, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(numbers.len(), 2);
+    assert_eq!(numbers[0], ("1e-400", 0.0));
+    assert_eq!(numbers[1].0, "-1e-400");
+    assert_eq!(numbers[1].1, 0.0);
 }
 
 /// Every other departure from the grammar is refused where it starts.
