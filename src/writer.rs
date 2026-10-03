@@ -398,7 +398,6 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
 
     /// Refuse with `error`, found by an event source rather than by the
     /// writer, so no later event is accepted.
-    #[cfg(feature = "serde_json")]
     pub(crate) fn refuse(&mut self, error: Error) -> Result<(), Error> {
         self.guard(|_| Err(error))
     }
