@@ -74,20 +74,22 @@ fn deep_object() -> Value {
     value
 }
 
-/// Build a value, check it holds at least one `Value` of heap per level, drop
-/// it with `drop_value`, and check the live heap is back where it started.
+/// Build a value and drop it with `drop_value`; check it held at least one
+/// `Value` of heap per level and that the live heap is back where it started.
+/// The assertions come after the drop, so a failure never unwinds through
+/// serde_json's recursive `Drop` of a deep value.
 fn frees_everything(build: fn() -> Value) {
     let baseline = LIVE.load(Ordering::SeqCst);
     let value = build();
     let held = LIVE.load(Ordering::SeqCst).saturating_sub(baseline);
+    drop_value(value);
+    let after = LIVE.load(Ordering::SeqCst);
     assert!(
         held >= DEEP * std::mem::size_of::<Value>(),
         "the value holds its levels on the heap: {held} bytes"
     );
-    drop_value(value);
     assert_eq!(
-        LIVE.load(Ordering::SeqCst),
-        baseline,
+        after, baseline,
         "drop_value frees every byte the value held"
     );
 }
