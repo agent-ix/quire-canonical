@@ -10,7 +10,7 @@
 
 #![cfg(feature = "serde_json")]
 
-use quire_canonical::{drop_value, sha256, to_vec, Error, FixedShape, Limits};
+use quire_canonical::{drop_value, read, sha256, to_vec, Error, FixedShape, Limits};
 use serde::Serialize;
 use serde_json::{json, Map, Number, Value};
 
@@ -127,6 +127,31 @@ fn every_golden_vector_preimage_encodes_as_a_value() {
             vector["sha256"].as_str().expect("sha256"),
             "{name}"
         );
+    }
+}
+
+/// The canonical text `read` gives for `text`.
+fn read_canonical(text: &str) -> String {
+    let document = read(text.as_bytes(), u64::MAX).expect("reads");
+    String::from_utf8(to_vec(&document, LIMITS).expect("encodes")).expect("UTF-8")
+}
+
+/// A float literal gives the same bytes through a `Value` as through `read`:
+/// serde_json, built with `float_roundtrip`, parses it to its nearest double,
+/// as the reader does. Without that feature serde_json rounds
+/// `9007199254740993.0` twice, to `9007199254740994`.
+#[test]
+fn float_literals_give_the_same_bytes_through_a_value_as_through_read() {
+    for (text, expected) in [
+        ("9007199254740993.0", "9007199254740992"),
+        ("123456789.87654321", "123456789.87654321"),
+        ("2.2250738585072011e-308", "2.225073858507201e-308"),
+        ("1.7976931348623157e308", "1.7976931348623157e+308"),
+        ("0.30000000000000004", "0.30000000000000004"),
+    ] {
+        let value: Value = serde_json::from_str(text).expect("parses");
+        assert_eq!(canonical(&value), expected, "{text}");
+        assert_eq!(read_canonical(text), expected, "{text}");
     }
 }
 

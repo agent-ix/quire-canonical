@@ -25,8 +25,12 @@ default = ["std"]
 # carries an `io::Error`. Without it the crate is `no_std` + `alloc`: encoding
 # into a `Vec<u8>` or a SHA-256 hasher, and digest minting, still work.
 std = ["serde/std", "sha2/std"]
-# `impl Encode for serde_json::Value`. serde_json is built with its `alloc`
-# feature only, so this works with or without `std`.
+# `impl Encode for serde_json::Value` and `drop_value`. serde_json is built
+# with `alloc` rather than `std`, so this works with or without `std`, and
+# with `float_roundtrip`, so a float literal parses to its nearest double, as
+# `read` parses it. Without it serde_json rounds some literals twice, and the
+# same JSON text would give different bytes through a `Value` than through
+# `read`.
 serde_json = ["dep:serde_json"]
 # Test lane only: turns on `serde_json/preserve_order` so the golden vectors
 # run against an insertion-ordered `serde_json::Map` as well as the default
@@ -43,7 +47,10 @@ ryu-js = "1"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 sha2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
-serde_json = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+serde_json = { version = "1", optional = true, default-features = false, features = [
+    "alloc",
+    "float_roundtrip",
+] }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

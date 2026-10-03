@@ -48,8 +48,11 @@ The `serde_json` feature, off by default, implements `Encode` for
 `serde_json::Value`. The value walks itself from an explicit heap stack and
 pushes `Writer` events, so a value of any depth encodes on any thread stack.
 Integers go through the integer rules and are refused past 2^53; floats get
-ECMAScript number text. serde_json is built with only its `alloc` feature, so
-this works without `std` as well. serde_json's own `Drop` for `Value` recurses
+ECMAScript number text. serde_json is built with `alloc` rather than `std`,
+so this works without `std` as well, and with `float_roundtrip`, so a float
+literal parses to its nearest double and gives the same bytes through a
+`Value` as through `read`. Feature unification turns `float_roundtrip` on for
+every crate in a build that enables this feature. serde_json's own `Drop` for `Value` recurses
 once per level, so whoever owns a deep `Value` drops it with
 `quire_canonical::drop_value`, which uses a heap stack instead.
 
