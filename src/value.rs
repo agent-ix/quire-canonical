@@ -34,12 +34,17 @@ enum Open<'v> {
 ///   [`Writer::integer`], and is refused past `2^53` like any Rust integer.
 ///   A float goes through [`Writer::number`]. serde_json holds no NaN or
 ///   infinity in a `Value`.
-/// * With serde_json's `arbitrary_precision` feature a `Number` is its
-///   literal text, classified by serde_json's own `as_i64`, `as_u64` and
-///   `is_f64`, so the bytes and refusals are the same as without it. Two
-///   texts exist only in that mode, and both are refused: an integer too wide
-///   for 64 bits ([`Error::WideIntegerMagnitudeAboveMaximum`]) and a literal
-///   whose double is infinite, such as `1e400` ([`Error::NonFiniteNumber`]).
+/// * With serde_json's `arbitrary_precision`, which feature unification
+///   turns on for every crate in a build once any crate enables it, a
+///   `Number` is its literal text. serde_json's own `as_i64`, `as_u64` and
+///   `is_f64` still classify it, so 64-bit integers and finite floats encode
+///   as they do without it. Two kinds of literal do not: an integer literal
+///   past the 64-bit range, which serde_json otherwise parses as a float and
+///   this encodes as its double, stays an integer and is refused
+///   ([`Error::WideIntegerMagnitudeAboveMaximum`]); and a literal whose
+///   double is infinite, such as `1e400`, which serde_json otherwise refuses
+///   to parse, is refused ([`Error::NonFiniteNumber`]). So whether a `Value`
+///   parsed from such an integer literal encodes depends on the build.
 ///
 /// serde_json's own `Drop`, `Clone`, `PartialEq` and `Debug` for `Value`
 /// recurse once per nesting level. Encoding only borrows the value, but a
