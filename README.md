@@ -50,7 +50,8 @@ pushes `Writer` events, so a value of any depth encodes on any thread stack.
 Integers go through the integer rules and are refused past 2^53; floats get
 ECMAScript number text. serde_json is built with only its `alloc` feature, so
 this works without `std` as well. serde_json's own `Drop` for `Value` recurses
-once per level, so whoever owns a deep `Value` must drop it from a heap stack.
+once per level, so whoever owns a deep `Value` drops it with
+`quire_canonical::drop_value`, which uses a heap stack instead.
 
 Arrays and scalars stream to the sink. While any object is open its canonical
 bytes are buffered, so its members can be sorted; a top-level object is

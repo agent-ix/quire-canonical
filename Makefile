@@ -13,8 +13,8 @@ help:
 	@echo "  make fmt              - Format with rustfmt"
 	@echo "  make fmt-check        - Verify formatting (CI gate)"
 	@echo "  make lint             - Clippy with -D warnings"
-	@echo "  make test             - cargo test: default, preserve_order and no-std lanes"
-	@echo "  make build-no-std     - Build without std for $(NO_STD_TARGET)"
+	@echo "  make test             - cargo test: default (+serde_json), preserve_order and no-std lanes"
+	@echo "  make build-no-std     - Build without std for $(NO_STD_TARGET), with and without serde_json"
 	@echo "  make build            - Release build"
 	@echo "  make clean            - cargo clean"
 	@echo "  make deny             - cargo deny check (advisories, bans, licenses, sources)"
@@ -47,9 +47,12 @@ lint:
 .PHONY: test
 test: test-default test-preserve-order test-no-std
 
+# With the `serde_json` feature, so the `serde_json::Value` tests run against
+# the default `BTreeMap`-backed Map here and the insertion-ordered one in
+# test-preserve-order.
 .PHONY: test-default
 test-default:
-	$(CARGO) test
+	$(CARGO) test --features serde_json
 
 .PHONY: test-preserve-order
 test-preserve-order:
@@ -64,6 +67,7 @@ test-no-std:
 .PHONY: build-no-std
 build-no-std:
 	$(CARGO) build --no-default-features --target $(NO_STD_TARGET)
+	$(CARGO) build --no-default-features --features serde_json --target $(NO_STD_TARGET)
 
 .PHONY: build
 build:

@@ -31,10 +31,10 @@ serde_json = ["dep:serde_json"]
 # Test lane only: turns on `serde_json/preserve_order` so the golden vectors
 # run against an insertion-ordered `serde_json::Map` as well as the default
 # `BTreeMap` one. `make test` runs the suite both ways. It also turns on the
-# `serde_json` feature, so the `serde_json::Value` tests run in this lane, where
-# a map iterates in insertion order and the encoder alone puts members in
-# canonical order. The encoder never reads this feature; its output does not
-# depend on it.
+# `serde_json` feature, so the `serde_json::Value` tests run where a map
+# iterates in insertion order and the encoder alone puts members in canonical
+# order. The encoder never reads this feature; its output does not depend on
+# it.
 test-preserve-order = ["serde_json", "serde_json/preserve_order"]
 
 [dependencies]

@@ -4,7 +4,8 @@
 //!
 //! A `Value`'s depth follows its input, so it cannot take the serde path: it
 //! walks itself with an explicit heap stack and pushes [`Writer`] events, the
-//! way [`crate::NodeRef`] does.
+//! way [`crate::NodeRef`] does. [`drop_value`] drops one the same way, since
+//! serde_json's own `Drop` recurses.
 
 use alloc::string::ToString as _;
 use alloc::vec::Vec;
@@ -42,9 +43,8 @@ enum Open<'v> {
 ///
 /// serde_json's own `Drop`, `Clone`, `PartialEq` and `Debug` for `Value`
 /// recurse once per nesting level. Encoding only borrows the value, but a
-/// caller holding a deep `Value` must also drop it without recursing, for
-/// example by moving its children onto a heap stack before each node is
-/// dropped.
+/// caller holding a deep `Value` must also drop it without recursing:
+/// [`drop_value`] does that.
 impl Encode for Value {
     fn encode_into<S: Sink + ?Sized>(&self, writer: &mut Writer<'_, S>) -> Result<(), Error> {
         let mut stack: Vec<Open<'_>> = Vec::new();
@@ -109,6 +109,40 @@ impl Encode for Value {
                 }
                 stack.pop();
             }
+        }
+    }
+}
+
+/// Drop `value` without recursing, so a value of any depth drops on any
+/// thread stack.
+///
+/// serde_json's own `Drop` for `Value` recurses once per nesting level, so
+/// dropping a deep value (one parsed with serde_json's `unbounded_depth`, or
+/// built in a loop) overflows the thread stack. This moves each array's
+/// elements and each object's member values onto a heap stack before the
+/// array or object itself is dropped, so every node is dropped with no
+/// children left in it. There is no depth limit.
+///
+/// The heap stack holds the nodes waiting to be dropped, never more than the
+/// value had. It grows like any `Vec`, so running out of memory while it
+/// grows aborts, as it would for any other allocation in a destructor.
+///
+/// ```
+/// use serde_json::Value;
+///
+/// let mut value = Value::Null;
+/// for _ in 0..100_000 {
+///     value = Value::Array(vec![value]);
+/// }
+/// quire_canonical::drop_value(value);
+/// ```
+pub fn drop_value(value: Value) {
+    let mut pending = Vec::from([value]);
+    while let Some(node) = pending.pop() {
+        match node {
+            Value::Array(items) => pending.extend(items),
+            Value::Object(members) => pending.extend(members.into_iter().map(|(_, member)| member)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
 }

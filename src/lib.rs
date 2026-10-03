@@ -21,7 +21,8 @@
 //!   the path for data whose depth follows its input.
 //! * [`Document`], the arena tree [`read`] produces, encodes itself through
 //!   the [`Writer`] from an explicit heap stack. With the `serde_json`
-//!   feature, so does `serde_json::Value`.
+//!   feature, so does `serde_json::Value`, and `drop_value` drops one
+//!   without recursing.
 //! * A [`FixedShape`] type encodes through its serde `Serialize`. serde
 //!   recurses once per nesting level, so only types whose depth is fixed by
 //!   their schema may take this path. `#[derive(FixedShape)]` computes
@@ -119,6 +120,8 @@ pub use crate::shape::{deepest, nest, FixedShape};
 pub use crate::sink::Sink;
 #[cfg(feature = "std")]
 pub use crate::sink::WriteSink;
+#[cfg(feature = "serde_json")]
+pub use crate::value::drop_value;
 pub use crate::writer::Writer;
 /// `#[derive(FixedShape)]`: computes `DEPTH` from every field's `DEPTH`.
 pub use quire_canonical_derive::FixedShape;

@@ -2,15 +2,15 @@
 // Copyright (C) 2026 Agent-IX
 //! `serde_json::Value` through its iterative `Encode` impl (the `serde_json`
 //! feature): the same bytes as the serde path and the golden vectors, any
-//! depth on a small thread stack, and the numbers it refuses.
+//! depth on a small thread stack, the numbers it refuses, and `drop_value`.
 //!
-//! `make test` runs this file in its `test-preserve-order` lane, which turns
-//! the feature on. There `serde_json::Map` iterates in insertion order, so the
-//! encoder alone puts members in canonical order.
+//! `make test` runs this file twice: with serde_json's default
+//! `BTreeMap`-backed `Map`, and with `preserve_order`, where a map iterates in
+//! insertion order and the encoder alone puts members in canonical order.
 
 #![cfg(feature = "serde_json")]
 
-use quire_canonical::{sha256, to_vec, Error, FixedShape, Limits};
+use quire_canonical::{drop_value, sha256, to_vec, Error, FixedShape, Limits};
 use serde::Serialize;
 use serde_json::{json, Map, Number, Value};
 
@@ -140,20 +140,6 @@ fn on_small_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
         .expect("no stack overflow")
 }
 
-/// Drop `value` from a heap stack. serde_json's own `Drop` recurses once per
-/// level, so a deep value dropped natively would overflow the small stack:
-/// each node's children move onto the heap stack before the node is dropped.
-fn dismantle(value: Value) {
-    let mut stack = vec![value];
-    while let Some(value) = stack.pop() {
-        match value {
-            Value::Array(items) => stack.extend(items),
-            Value::Object(members) => stack.extend(members.into_iter().map(|(_, member)| member)),
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
-    }
-}
-
 /// `DEEP` nested arrays, built from the inside out without recursion.
 fn deep_array() -> Value {
     let mut value = Value::Array(Vec::new());
@@ -175,12 +161,13 @@ fn deep_object() -> Value {
     value
 }
 
-/// Build, encode and drop a value on a 64 KiB stack; return its bytes.
+/// Build, encode and drop a value on a 64 KiB stack; return its bytes. The
+/// value goes through `drop_value`: serde_json's own `Drop` would overflow.
 fn encode_on_small_stack(build: fn() -> Value) -> String {
     let bytes = on_small_stack(move || {
         let value = build();
         let bytes = to_vec(&value, Limits::new(u64::MAX)).expect("encodes at any depth");
-        dismantle(value);
+        drop_value(value);
         bytes
     });
     String::from_utf8(bytes).expect("UTF-8")
@@ -200,6 +187,18 @@ fn a_100000_deep_array_encodes_on_a_64_kib_stack() {
 fn a_100000_deep_object_encodes_on_a_64_kib_stack() {
     let expected = format!("{}null{}", r#"{"k":"#.repeat(DEEP), "}".repeat(DEEP));
     assert_eq!(encode_on_small_stack(deep_object), expected);
+}
+
+/// `drop_value` drops a 100,000-deep array and a 100,000-deep object on a
+/// 64 KiB stack. serde_json's own recursive `Drop` overflows that stack, and
+/// a stack overflow aborts the whole test process, so the drops returning is
+/// the check.
+#[test]
+fn drop_value_drops_100000_deep_values_on_a_64_kib_stack() {
+    on_small_stack(|| {
+        drop_value(deep_array());
+        drop_value(deep_object());
+    });
 }
 
 /// An integer past `2^53`, from an `i64` or a `u64`, at the top level or
