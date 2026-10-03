@@ -396,6 +396,13 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         self.guard(|writer| crate::encoder::serialize(writer, value))
     }
 
+    /// Refuse with `error`, found by an event source rather than by the
+    /// writer, so no later event is accepted.
+    #[cfg(feature = "serde_json")]
+    pub(crate) fn refuse(&mut self, error: Error) -> Result<(), Error> {
+        self.guard(|_| Err(error))
+    }
+
     /// Run `event`, and remember a refusal so no later event is accepted.
     fn guard(&mut self, event: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         if self.refused {

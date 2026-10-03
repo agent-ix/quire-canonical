@@ -20,7 +20,8 @@
 //!   `string`, `end_object` and so on from its own explicit stack. This is
 //!   the path for data whose depth follows its input.
 //! * [`Document`], the arena tree [`read`] produces, encodes itself through
-//!   the [`Writer`] from an explicit heap stack.
+//!   the [`Writer`] from an explicit heap stack. With the `serde_json`
+//!   feature, so does `serde_json::Value`.
 //! * A [`FixedShape`] type encodes through its serde `Serialize`. serde
 //!   recurses once per nesting level, so only types whose depth is fixed by
 //!   their schema may take this path. `#[derive(FixedShape)]` computes
@@ -30,8 +31,9 @@
 //!   way; a literal `DEPTH` defeats it (see [`FixedShape`]).
 //!
 //! [`encode`], [`to_vec`], [`sha256`] and [`sha256_with_domain`] accept any
-//! [`Encode`] value: a [`FixedShape`] type, a [`Document`] or [`NodeRef`], or
-//! a caller's own event source.
+//! [`Encode`] value: a [`FixedShape`] type, a [`Document`] or [`NodeRef`], a
+//! `serde_json::Value` (with the `serde_json` feature), or a caller's own
+//! event source.
 //!
 //! # Encoding rules
 //!
@@ -94,6 +96,8 @@ mod order;
 mod read;
 mod shape;
 mod sink;
+#[cfg(feature = "serde_json")]
+mod value;
 mod writer;
 
 use alloc::vec::Vec;
@@ -145,7 +149,8 @@ impl Limits {
 /// A value that writes itself into a [`Writer`] as exactly one JSON value.
 ///
 /// Every [`FixedShape`] type is one, through its serde encoding, and so are
-/// [`Document`] and [`NodeRef`]. Implement it for a type whose depth follows
+/// [`Document`], [`NodeRef`] and, with the `serde_json` feature,
+/// `serde_json::Value`. Implement it for a type whose depth follows
 /// its input by pushing events from an explicit stack, never by recursion.
 pub trait Encode {
     /// Push this value's events into `writer`.

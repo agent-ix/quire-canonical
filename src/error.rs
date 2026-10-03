@@ -121,6 +121,12 @@ pub enum Error {
     /// `2^53` bound.
     #[error("integer {0} exceeds the maximum integer magnitude of 2^53 (9007199254740992)")]
     UnsignedIntegerMagnitudeAboveMaximum(u128),
+    /// An integer too wide for 64 bits in a `serde_json::Number`, which only
+    /// serde_json's `arbitrary_precision` feature can hold; carries its
+    /// decimal text. Its magnitude exceeds the same `2^53` bound.
+    #[cfg(feature = "serde_json")]
+    #[error("integer {0} exceeds the maximum integer magnitude of 2^53 (9007199254740992)")]
+    WideIntegerMagnitudeAboveMaximum(String),
     /// An object member name that is not a string.
     #[error("object member name must be a string, found {found}")]
     NonStringMemberName {
