@@ -46,6 +46,7 @@ tests/encode.rs        # serde data model mapping, event API and refusals
 tests/value.rs         # serde_json::Value encoding and drop_value (`serde_json` feature)
 tests/derive.rs        # #[derive(FixedShape)]; a recursive type fails with E0391
 tests/memory.rs        # peak heap per shape, writer and reader
+tests/drop_value.rs    # drop_value frees everything (counting allocator; `serde_json` feature)
 benches/               # criterion benchmarks (opt-in; add criterion to dev-deps)
 spec/                  # requirements artifacts (from /spec-create-spec)
 scripts/               # local tooling
