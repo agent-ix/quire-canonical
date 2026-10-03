@@ -39,6 +39,12 @@ fn canonical(value: &Value) -> String {
     String::from_utf8(to_vec(value, LIMITS).expect("encodes")).expect("UTF-8")
 }
 
+/// Whether serde_json was built with `arbitrary_precision`, the only mode in
+/// which a `Number` holds an integer past 64 bits.
+fn arbitrary_precision() -> bool {
+    Number::from_u128(1 << 64).is_some()
+}
+
 /// Ordinary values encode to their RFC 8785 text, byte for byte the same as
 /// the serde path gives for the same `Value`: member names in UTF-16 order at
 /// every level (supplementary-plane names before U+E000..U+FFFF ones),
@@ -91,12 +97,15 @@ fn ordinary_values_match_the_serde_path_and_their_canonical_text() {
         (json!("caf\u{E9}"), "\"caf\u{E9}\""),
     ];
     for (value, expected) in cases {
-        assert_eq!(canonical(&value), expected, "{value}");
-        assert_eq!(
-            to_vec(&value, LIMITS).expect("iterative"),
-            to_vec(&ViaSerde(&value), LIMITS).expect("serde path"),
-            "{value}"
-        );
+        let bytes = to_vec(&value, LIMITS).expect("encodes");
+        assert_eq!(String::from_utf8_lossy(&bytes), expected, "{value}");
+        match to_vec(&ViaSerde(&value), LIMITS) {
+            Ok(serde) => assert_eq!(bytes, serde, "{value}"),
+            // With serde_json's `arbitrary_precision` a `Number` serializes as
+            // a private token, which the serde path refuses by design.
+            Err(Error::SerdeJsonPrivateToken(_)) if arbitrary_precision() => {}
+            Err(error) => panic!("{value}: serde path refused: {error}"),
+        }
     }
 }
 
@@ -222,27 +231,25 @@ fn integers_past_two_pow_53_are_refused() {
 fn numbers_only_arbitrary_precision_holds_are_refused() {
     let infinite = serde_json::from_str::<Value>("[1e400]");
     let wide = "1".to_owned() + &"0".repeat(40);
-    match Number::from_u128(1 << 64) {
-        Some(beyond_u64) => {
-            let infinite = infinite.expect("arbitrary_precision keeps the literal");
-            assert!(matches!(
-                to_vec(&infinite, LIMITS),
-                Err(Error::NonFiniteNumber(found)) if found == f64::INFINITY
-            ));
-            for (value, text) in [
-                (Value::Number(beyond_u64), "18446744073709551616"),
-                (serde_json::from_str(&wide).expect("parses"), wide.as_str()),
-            ] {
-                match to_vec(&value, LIMITS) {
-                    Err(Error::WideIntegerMagnitudeAboveMaximum(found)) => assert_eq!(found, text),
-                    other => panic!("{value}: expected refusal, got {other:?}"),
-                }
+    if arbitrary_precision() {
+        let infinite = infinite.expect("arbitrary_precision keeps the literal");
+        assert!(matches!(
+            to_vec(&infinite, LIMITS),
+            Err(Error::NonFiniteNumber(found)) if found == f64::INFINITY
+        ));
+        let beyond_u64 = Number::from_u128(1 << 64).expect("arbitrary_precision");
+        for (value, text) in [
+            (Value::Number(beyond_u64), "18446744073709551616"),
+            (serde_json::from_str(&wide).expect("parses"), wide.as_str()),
+        ] {
+            match to_vec(&value, LIMITS) {
+                Err(Error::WideIntegerMagnitudeAboveMaximum(found)) => assert_eq!(found, text),
+                other => panic!("{value}: expected refusal, got {other:?}"),
             }
         }
-        None => {
-            assert!(infinite.is_err(), "1e400 has no finite double");
-            assert!(Number::from_f64(f64::INFINITY).is_none());
-            assert!(Number::from_f64(f64::NAN).is_none());
-        }
+    } else {
+        assert!(infinite.is_err(), "1e400 has no finite double");
+        assert!(Number::from_f64(f64::INFINITY).is_none());
+        assert!(Number::from_f64(f64::NAN).is_none());
     }
 }
