@@ -79,7 +79,7 @@ fn deep_object() -> Value {
 fn frees_everything(build: fn() -> Value) {
     let baseline = LIVE.load(Ordering::SeqCst);
     let value = build();
-    let held = LIVE.load(Ordering::SeqCst) - baseline;
+    let held = LIVE.load(Ordering::SeqCst).saturating_sub(baseline);
     assert!(
         held >= DEEP * std::mem::size_of::<Value>(),
         "the value holds its levels on the heap: {held} bytes"
