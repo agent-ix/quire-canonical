@@ -20,7 +20,9 @@
 //!   `string`, `end_object` and so on from its own explicit stack. This is
 //!   the path for data whose depth follows its input.
 //! * [`Document`], the arena tree [`read`] produces, encodes itself through
-//!   the [`Writer`] from an explicit heap stack.
+//!   the [`Writer`] from an explicit heap stack. With the `serde_json`
+//!   feature, so does `serde_json::Value`, and `drop_value` drops one
+//!   without recursing.
 //! * A [`FixedShape`] type encodes through its serde `Serialize`. serde
 //!   recurses once per nesting level, so only types whose depth is fixed by
 //!   their schema may take this path. `#[derive(FixedShape)]` computes
@@ -30,8 +32,9 @@
 //!   way; a literal `DEPTH` defeats it (see [`FixedShape`]).
 //!
 //! [`encode`], [`to_vec`], [`sha256`] and [`sha256_with_domain`] accept any
-//! [`Encode`] value: a [`FixedShape`] type, a [`Document`] or [`NodeRef`], or
-//! a caller's own event source.
+//! [`Encode`] value: a [`FixedShape`] type, a [`Document`] or [`NodeRef`], a
+//! `serde_json::Value` (with the `serde_json` feature), or a caller's own
+//! event source.
 //!
 //! # Encoding rules
 //!
@@ -45,7 +48,10 @@
 //!   integer; an exact integer past that bound must travel as a decimal
 //!   string instead. This bound is on the Rust value the encoder receives,
 //!   not on JSON text: a JSON number read by [`read`] is the double its text
-//!   denotes, and is encoded as that double. An `f32` is widened to the `f64`
+//!   denotes, and is encoded as that double. A `serde_json::Value` number
+//!   held as an `i64` or `u64` is a Rust integer in this sense, so the same
+//!   JSON text can be refused through a `Value` and encoded through [`read`].
+//!   An `f32` is widened to the `f64`
 //!   with the same value, so `0.1_f32` encodes as `0.10000000149011612`;
 //!   encode an `f64` when the decimal spelling is what is meant.
 //! * Strings are escaped as §3.2.2.2 requires, with no Unicode normalization.
@@ -94,6 +100,8 @@ mod order;
 mod read;
 mod shape;
 mod sink;
+#[cfg(feature = "serde_json")]
+mod value;
 mod writer;
 
 use alloc::vec::Vec;
@@ -115,6 +123,8 @@ pub use crate::shape::{deepest, nest, FixedShape};
 pub use crate::sink::Sink;
 #[cfg(feature = "std")]
 pub use crate::sink::WriteSink;
+#[cfg(feature = "serde_json")]
+pub use crate::value::drop_value;
 pub use crate::writer::Writer;
 /// `#[derive(FixedShape)]`: computes `DEPTH` from every field's `DEPTH`.
 pub use quire_canonical_derive::FixedShape;
@@ -145,7 +155,8 @@ impl Limits {
 /// A value that writes itself into a [`Writer`] as exactly one JSON value.
 ///
 /// Every [`FixedShape`] type is one, through its serde encoding, and so are
-/// [`Document`] and [`NodeRef`]. Implement it for a type whose depth follows
+/// [`Document`], [`NodeRef`] and, with the `serde_json` feature,
+/// `serde_json::Value`. Implement it for a type whose depth follows
 /// its input by pushing events from an explicit stack, never by recursion.
 pub trait Encode {
     /// Push this value's events into `writer`.

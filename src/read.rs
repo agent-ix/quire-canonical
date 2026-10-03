@@ -372,7 +372,8 @@ impl Encode for NodeRef<'_> {
         }
         let document = self.document;
         let mut tasks = Vec::new();
-        push_task(&mut tasks, Task::Value(self.id))?;
+        reserve_tasks(writer, &mut tasks, 1)?;
+        tasks.push(Task::Value(self.id));
         while let Some(task) = tasks.pop() {
             match task {
                 Task::Value(id) => match document.slot(id) {
@@ -386,7 +387,7 @@ impl Encode for NodeRef<'_> {
                             .items
                             .get(range.start..range.end)
                             .unwrap_or_default();
-                        reserve_tasks(&mut tasks, ids.len().saturating_add(1))?;
+                        reserve_tasks(writer, &mut tasks, ids.len().saturating_add(1))?;
                         tasks.push(Task::EndArray);
                         tasks.extend(ids.iter().rev().map(|id| Task::Value(*id)));
                     }
@@ -396,7 +397,11 @@ impl Encode for NodeRef<'_> {
                             .members
                             .get(range.start..range.end)
                             .unwrap_or_default();
-                        reserve_tasks(&mut tasks, pairs.len().saturating_mul(2).saturating_add(1))?;
+                        reserve_tasks(
+                            writer,
+                            &mut tasks,
+                            pairs.len().saturating_mul(2).saturating_add(1),
+                        )?;
                         tasks.push(Task::EndObject);
                         for (name, id) in pairs.iter().rev() {
                             tasks.push(Task::Value(*id));
@@ -411,17 +416,18 @@ impl Encode for NodeRef<'_> {
         }
         return Ok(());
 
-        fn reserve_tasks<T>(tasks: &mut Vec<T>, additional: usize) -> Result<(), Error> {
-            tasks
-                .try_reserve(additional)
-                .map_err(|_| Error::Allocation {
+        /// Reserve room for `additional` tasks, or refuse through `writer`
+        /// so it accepts no later event.
+        fn reserve_tasks<T, S: Sink + ?Sized>(
+            writer: &mut Writer<'_, S>,
+            tasks: &mut Vec<T>,
+            additional: usize,
+        ) -> Result<(), Error> {
+            if tasks.try_reserve(additional).is_err() {
+                return writer.refuse(Error::Allocation {
                     requested: core::mem::size_of::<T>().saturating_mul(additional),
-                })
-        }
-
-        fn push_task<T>(tasks: &mut Vec<T>, task: T) -> Result<(), Error> {
-            reserve_tasks(tasks, 1)?;
-            tasks.push(task);
+                });
+            }
             Ok(())
         }
     }

@@ -13,8 +13,8 @@ help:
 	@echo "  make fmt              - Format with rustfmt"
 	@echo "  make fmt-check        - Verify formatting (CI gate)"
 	@echo "  make lint             - Clippy with -D warnings"
-	@echo "  make test             - cargo test: default, preserve_order and no-std lanes"
-	@echo "  make build-no-std     - Build without std for $(NO_STD_TARGET)"
+	@echo "  make test             - cargo test: default (+serde_json), preserve_order, no-std and arbitrary_precision lanes"
+	@echo "  make build-no-std     - Build without std for $(NO_STD_TARGET), with and without serde_json"
 	@echo "  make build            - Release build"
 	@echo "  make clean            - cargo clean"
 	@echo "  make deny             - cargo deny check (advisories, bans, licenses, sources)"
@@ -45,11 +45,14 @@ lint:
 # Map and against its preserve_order (insertion-ordered) Map. The canonical
 # bytes must be identical both ways (PLAT-987 AC-3).
 .PHONY: test
-test: test-default test-preserve-order test-no-std
+test: test-default test-preserve-order test-no-std test-arbitrary-precision
 
+# With the `serde_json` feature, so the `serde_json::Value` tests run against
+# the default `BTreeMap`-backed Map here and the insertion-ordered one in
+# test-preserve-order.
 .PHONY: test-default
 test-default:
-	$(CARGO) test
+	$(CARGO) test --features serde_json
 
 .PHONY: test-preserve-order
 test-preserve-order:
@@ -61,9 +64,17 @@ test-preserve-order:
 test-no-std:
 	$(CARGO) test --no-default-features
 
+# The `serde_json::Value` tests with serde_json's `arbitrary_precision`, where
+# a Number is its literal text: the only build in which the wide-integer and
+# non-finite refusals are reachable.
+.PHONY: test-arbitrary-precision
+test-arbitrary-precision:
+	$(CARGO) test --features serde_json,serde_json/arbitrary_precision --test value
+
 .PHONY: build-no-std
 build-no-std:
 	$(CARGO) build --no-default-features --target $(NO_STD_TARGET)
+	$(CARGO) build --no-default-features --features serde_json --target $(NO_STD_TARGET)
 
 .PHONY: build
 build:
