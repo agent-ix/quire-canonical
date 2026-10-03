@@ -454,7 +454,9 @@ impl Encode for NodeRef<'_> {
 /// [`ReadError::Limit`] when `input` is longer than `max_input_bytes`,
 /// before any of it is read; [`ReadError::Malformed`] with the byte offset of
 /// the fault otherwise (see the module docs for what is refused);
-/// [`ReadError::Allocation`] when memory runs out.
+/// [`ReadError::NumberOutOfRange`] with the number's JSON pointer and source
+/// text when a number has no finite double; [`ReadError::Allocation`] when
+/// memory runs out.
 pub fn read(input: &[u8], max_input_bytes: u64) -> Result<Document, ReadError> {
     let length = u64::try_from(input.len()).unwrap_or(u64::MAX);
     if length > max_input_bytes {
@@ -620,18 +622,29 @@ impl<'i> Parser<'i> {
                 items_end = open.start;
             }
         }
+        // The exact length of the escaped path: one `/` per step, then the
+        // decimal index or the name with `~` and `/` doubled.
+        let mut length = 0_usize;
+        for step in &steps {
+            let part = match step {
+                Step::Index(index) => index
+                    .checked_ilog10()
+                    .map_or(1, |digits| digits as usize + 1),
+                Step::Name(range) => {
+                    let name = self.text.get(range.start..range.end).unwrap_or_default();
+                    name.len()
+                        + name
+                            .bytes()
+                            .filter(|byte| matches!(byte, b'~' | b'/'))
+                            .count()
+                }
+            };
+            length = length.saturating_add(1).saturating_add(part);
+        }
         let mut pointer = String::new();
-        // Escaping only grows a name, by at most twice.
         pointer
-            .try_reserve(
-                self.text
-                    .len()
-                    .saturating_mul(2)
-                    .saturating_add(steps.len() * 21),
-            )
-            .map_err(|_| ReadError::Allocation {
-                requested: self.text.len(),
-            })?;
+            .try_reserve_exact(length)
+            .map_err(|_| ReadError::Allocation { requested: length })?;
         for step in steps.iter().rev() {
             pointer.push('/');
             match step {

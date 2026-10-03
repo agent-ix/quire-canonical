@@ -51,7 +51,7 @@ fn out_of_range(text: &str) -> (usize, String, String) {
     }
 }
 
-/// QSL-219: a number with no finite double is refused at its first byte,
+/// FR-259: a number with no finite double is refused at its first byte,
 /// with its JSON pointer and exact source text.
 #[test]
 fn number_out_of_double_range_carries_pointer_and_lexeme() {
@@ -74,7 +74,7 @@ fn number_out_of_double_range_carries_pointer_and_lexeme() {
     );
 }
 
-/// QSL-219: `1e-400` underflows to 0.0, which is finite, so it is accepted
+/// FR-259: `1e-400` underflows to 0.0, which is finite, so it is accepted
 /// and keeps its source text. QSL classifies it on its side.
 #[test]
 fn number_underflow_is_accepted_with_its_text() {
