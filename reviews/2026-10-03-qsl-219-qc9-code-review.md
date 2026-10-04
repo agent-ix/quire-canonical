@@ -69,3 +69,13 @@ logic is correct, iterative and fallible.
 | FND-001 | low | The `# Errors` section of `read` still lists only `Limit`, `Malformed` ("with the byte offset of the fault otherwise") and `Allocation`. It does not list the new `ReadError::NumberOutOfRange`, so the rustdoc tells a caller that an out-of-range number is a `Malformed`. Fix: add the variant to the list. | src/read.rs:452-457 |
 | FND-002 | low | `pointer()` reserves `text.len() * 2 + steps * 21` bytes. That is twice all the decoded text read so far, not twice the names on the path. On a large document, the error path asks for up to twice the document's size, and under memory pressure the `NumberOutOfRange` turns into an `Allocation` error. The `Allocation { requested }` it reports is `self.text.len()`, not the amount actually requested. Fix: sum the escaped length of each name step and the digits of each index step, then reserve exactly that (or reserve per step), and report the real request. | src/read.rs:624-634 |
 | FND-003 | low | The test doc tag changed from the requirement id `FR-259` to the ticket id `QSL-219` on `number_out_of_double_range_carries_pointer_and_lexeme` and `number_underflow_is_accepted_with_its_text`. A ticket id is not a requirement. The refusal is still the FR-259 behaviour that the sibling test (`FR-259: a lone surrogate escape...`) traces. Fix: keep `FR-259` (plus the QSL-side FR/AC that the pointer and lexeme serve, if one exists). | tests/read.rs:54, tests/read.rs:77 |
+
+## Dispositions
+
+Round 1, reviewed at d02a3c65c80521098f159c8b7da9a335079ce1a4 (diff ded2d7ff..d02a3c65). Focused run under the build lock: `cargo test --test read` passed (9 tests) and all four `make lint` clippy lanes passed with `-D warnings`. The committed reviews/2026-10-03-qsl-219-qc9-*.md files are byte-identical to the reviewer's copies as they were before this round.
+
+| FND | Outcome | sha/reason |
+| --- | --- | --- |
+| FND-001 | fixed | d02a3c6: the `read` `# Errors` doc now lists `ReadError::NumberOutOfRange` "with the number's JSON pointer and source text when a number has no finite double" (src/read.rs:454-459). |
+| FND-002 | fixed | d02a3c6: `pointer()` computes the exact escaped length. Each step adds one `/`, then either the index's decimal digits (`checked_ilog10` + 1, or 1 for 0) or the name's bytes plus one for each `~` and `/`. It reserves that with `try_reserve_exact(length)` and reports `Allocation { requested: length }`. The sum saturates, and an escaped name is at most twice its bytes, so nothing can overflow. Because the reservation is exact, the later `write!` and `push` calls never reallocate. |
+| FND-003 | fixed | d02a3c6: both tests are tagged `FR-259` again (tests/read.rs:54, 77). |
