@@ -117,7 +117,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use super::{cmp_member_names, Unescaped};
+    use super::{cmp_member_names, cmp_names, Unescaped};
     use crate::escape::escape_fragment;
 
     fn member(name: &str) -> Vec<u8> {
@@ -178,6 +178,7 @@ mod tests {
         for left in &names {
             for right in &names {
                 let expected = left.encode_utf16().cmp(right.encode_utf16());
+                assert_eq!(cmp_names(left.as_bytes(), right.as_bytes()), expected);
                 assert_eq!(
                     cmp_member_names(&member(left), &member(right)),
                     expected,

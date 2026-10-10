@@ -12,7 +12,7 @@
 //! # What streams and what is buffered
 //!
 //! Scalars, strings and arrays go straight to the sink while no object is
-//! open. Objects cannot: RFC 8785 orders members by name, and the caller
+//! open. Ordinary object members cannot: RFC 8785 orders members by name, and the caller
 //! hands members over in whatever order it holds them. So while any object is
 //! open, canonical bytes are appended to one shared buffer in the order they
 //! are produced, and each open object records where each of its members lies
@@ -26,8 +26,8 @@
 //! So every close costs the sort of that object's own members, and every
 //! byte is copied into the buffer once and out of it once, whatever the
 //! nesting. A top-level array streams element by element, but a top-level
-//! *object* is held whole until it closes, and the sink sees its first byte
-//! only then.
+//! *object* holds its member bytes until it closes. Its opening brace may
+//! already have reached the sink.
 //!
 //! [`Writer::begin_ordered_object`] instead opens a verified-order root without
 //! a sorting frame. Each name is checked by the same UTF-16 comparator, retaining
@@ -637,9 +637,11 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
                 core::cmp::Ordering::Less => {}
                 core::cmp::Ordering::Equal => {
                     let mut repeated = String::new();
-                    repeated.try_reserve(name.len()).map_err(|_| Error::Allocation {
-                        requested: name.len(),
-                    })?;
+                    repeated
+                        .try_reserve(name.len())
+                        .map_err(|_| Error::Allocation {
+                            requested: name.len(),
+                        })?;
                     repeated.push_str(name);
                     return Err(Error::DuplicateMemberName { name: repeated });
                 }

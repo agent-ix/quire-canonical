@@ -63,8 +63,8 @@
 //!
 //! Arrays, strings and scalars stream straight to the sink. An object's
 //! members must be sorted, so while any ordinary object is open its canonical bytes
-//! are buffered; a top-level object therefore reaches the sink only when it
-//! is complete. Buffered bytes are canonical output and count against
+//! are buffered; a top-level object's member bytes therefore reach the sink
+//! only when it is complete. Buffered bytes are canonical output and count against
 //! [`Limits::max_bytes`]; on top of that come 8 bytes of offsets per buffered
 //! member, small records per open and nested object, and `Vec` growth slack
 //! (see [`Writer`]). `tests/memory.rs` measures the peak heap per shape: under

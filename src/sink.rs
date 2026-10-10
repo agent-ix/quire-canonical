@@ -6,7 +6,7 @@
 //! text is final, in order, so a digest sink hashes the text in one pass.
 //! Bytes inside an open object are not final until the object closes and its
 //! members are sorted, so they are buffered first (see the crate docs): a
-//! ordinary top-level object reaches the sink only once it is complete.
+//! ordinary top-level object's member bytes reach the sink only once it is complete.
 //! [`crate::Writer::begin_ordered_object`] verifies names incrementally and
 //! streams the root through the same sink; nested ordinary objects still sort.
 
