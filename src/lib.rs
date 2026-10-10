@@ -62,7 +62,7 @@
 //! # Streaming and memory
 //!
 //! Arrays, strings and scalars stream straight to the sink. An object's
-//! members must be sorted, so while any object is open its canonical bytes
+//! members must be sorted, so while any ordinary object is open its canonical bytes
 //! are buffered; a top-level object therefore reaches the sink only when it
 //! is complete. Buffered bytes are canonical output and count against
 //! [`Limits::max_bytes`]; on top of that come 8 bytes of offsets per buffered
@@ -71,6 +71,20 @@
 //! 4x the canonical length for flat objects and objects of objects, and under
 //! 32x for a deep chain of objects, the worst shape per byte. [`read`] peaks
 //! under 64x its input length.
+//!
+//! [`Writer::begin_ordered_object`] opens a verified-order top-level object
+//! through this same encoder. Each name must strictly increase under the same
+//! UTF-16 comparator; descending names refuse with [`Error::MemberNameOutOfOrder`]
+//! and equal names with [`Error::DuplicateMemberName`]. Root names, scalars and
+//! arrays stream immediately; ordinary nested objects still buffer and sort.
+//! Root storage retains only the largest name capacity, plus open-container
+//! stacks and the largest buffered nested subtree, not previously streamed
+//! root values. Sink storage is additional. [`LimitKind::CanonicalBytes`] applies
+//! to every output byte in both paths. [`LimitKind::ObjectBytes`] remains the
+//! fixed u32 sorting-buffer offset bound, including nested ordinary objects;
+//! it does not constrain an ordered root with no sorting buffer. Accept output
+//! or finalize its digest only after [`Writer::finish`] succeeds; discard any
+//! prefix on refusal.
 //!
 //! ```
 //! use quire_canonical::{to_vec, FixedShape, Limits};

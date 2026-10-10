@@ -70,10 +70,46 @@ encodes as its double through both, unless serde_json's
 literal text, and the `Value` path refuses such an integer instead. Floats
 get ECMAScript number text.
 
-Arrays and scalars stream to the sink. While any object is open its canonical
-bytes are buffered, so its members can be sorted; a top-level object is
-therefore held whole before the first byte is hashed. The buffered bytes count
-against the byte ceiling; see the crate docs for the full memory bound.
+Arrays and scalars stream to the sink. Ordinary objects buffer their canonical
+bytes until closure so their members can be sorted.
+
+For a top-level object whose members already arrive in canonical order, use
+the same encoder's verified-order entry:
+
+```rust
+use quire_canonical::{Limits, Writer};
+
+let mut sink = Vec::new(); // a SHA-256 sink works here too
+let mut writer = Writer::new(&mut sink, Limits::new(64));
+writer.begin_ordered_object()?;
+writer.name("a")?;
+writer.integer(1)?;
+writer.name("b")?;
+writer.begin_array()?;
+writer.bool(true)?;
+writer.end_array()?;
+writer.end_object()?;
+writer.finish()?;
+assert_eq!(sink, br#"{"a":1,"b":[true]}"#);
+# Ok::<(), quire_canonical::Error>(())
+```
+
+Every name is checked for strictly increasing UTF-16 code-unit order.
+Descending names refuse with `Error::MemberNameOutOfOrder`; equal names retain
+`Error::DuplicateMemberName`. This entry is root-only. Ordinary nested objects
+still sort and buffer, while root names, scalars and arrays stream before root
+closure. String and number encoding is unchanged. Any refusal poisons subsequent
+events; sink contents, including a partial hash, must be discarded unless
+`finish` succeeds.
+
+The configured `CanonicalBytes` ceiling counts all bytes exactly once in both
+paths. The fixed `ObjectBytes` limit (`u32::MAX`) applies to actual sorting-buffer
+offsets, including nested ordinary objects. An ordered root has no sorting
+buffer and can stream past that size under its configured canonical ceiling.
+Its storage depends on the largest root name, open-container stack and largest
+buffered nested subtree, with allocation capacity slack, rather than total
+previously streamed bytes. Sink storage is additional. See the crate and writer
+docs for the ordinary buffered path's full memory bound.
 
 ## Build
 
