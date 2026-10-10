@@ -94,6 +94,31 @@ fn ratio(name: &str, length: usize, peak: usize) -> f64 {
 #[test]
 fn peak_heap_stays_within_the_documented_bounds() {
     let limits = Limits::new(u64::MAX);
+    // The payload is caller-owned and allocated before measurement. Names
+    // have fixed width; their ascending decimal order is canonical order.
+    let payload = "x".repeat(4096);
+    let mut previous_peak = None;
+    for count in [128, 8192] {
+        let mut length = 0;
+        let peak = peak_during(|| {
+            let mut sink = <sha2::Sha256 as sha2::Digest>::new();
+            let mut writer = Writer::new(&mut sink, limits);
+            writer.begin_ordered_object().expect("ordered root");
+            for index in 0..count {
+                writer.name(&format!("{index:08}")).expect("ordered name");
+                writer.string(&payload).expect("streamed payload");
+            }
+            writer.end_object().expect("close root");
+            length = writer.finish().expect("complete");
+        });
+        assert_eq!(length, 1 + count * (4096 + 14));
+        println!("ordered root {count}: {length} bytes, peak heap {peak} bytes");
+        assert!(peak < 4096, "root retained already-streamed values: {peak}");
+        if let Some(previous) = previous_peak {
+            assert_eq!(peak, previous, "storage scaled with total streamed bytes");
+        }
+        previous_peak = Some(peak);
+    }
     let flat: BTreeMap<String, u32> = (0..20_000).map(|index| (format!("{index}"), 1)).collect();
     let nested: BTreeMap<String, BTreeMap<String, u32>> = (0..200)
         .map(|outer| {

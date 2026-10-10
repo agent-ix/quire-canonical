@@ -74,8 +74,18 @@ impl Iterator for Unescaped<'_> {
 
 /// Compare two buffered members by their names' UTF-16 code units.
 pub(crate) fn cmp_member_names(left: &[u8], right: &[u8]) -> Ordering {
-    let mut left = Unescaped::member_name(left);
-    let mut right = Unescaped::member_name(right);
+    cmp_name_bytes(Unescaped::member_name(left), Unescaped::member_name(right))
+}
+
+/// Compare unescaped UTF-8 names with the same ordering used by the sort.
+pub(crate) fn cmp_names(left: &[u8], right: &[u8]) -> Ordering {
+    cmp_name_bytes(left.iter().copied(), right.iter().copied())
+}
+
+fn cmp_name_bytes(
+    mut left: impl Iterator<Item = u8>,
+    mut right: impl Iterator<Item = u8>,
+) -> Ordering {
     loop {
         match (left.next(), right.next()) {
             (None, None) => return Ordering::Equal,
@@ -107,7 +117,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use super::{cmp_member_names, Unescaped};
+    use super::{cmp_member_names, cmp_names, Unescaped};
     use crate::escape::escape_fragment;
 
     fn member(name: &str) -> Vec<u8> {
@@ -168,6 +178,7 @@ mod tests {
         for left in &names {
             for right in &names {
                 let expected = left.encode_utf16().cmp(right.encode_utf16());
+                assert_eq!(cmp_names(left.as_bytes(), right.as_bytes()), expected);
                 assert_eq!(
                     cmp_member_names(&member(left), &member(right)),
                     expected,

@@ -4,9 +4,11 @@
 //!
 //! The encoder hands a [`Sink`] only bytes whose position in the canonical
 //! text is final, in order, so a digest sink hashes the text in one pass.
-//! Bytes inside an open object are not final until the object closes and its
+//! Bytes inside an ordinary object are not final until the object closes and its
 //! members are sorted, so they are buffered first (see the crate docs): a
-//! top-level object reaches the sink only once it is complete.
+//! top-level ordinary object's member bytes reach the sink only once it is complete.
+//! [`crate::Writer::begin_ordered_object`] verifies names incrementally and
+//! streams the root through the same sink; nested ordinary objects still sort.
 
 use alloc::vec::Vec;
 #[cfg(feature = "std")]

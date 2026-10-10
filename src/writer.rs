@@ -11,8 +11,8 @@
 //!
 //! # What streams and what is buffered
 //!
-//! Scalars, strings and arrays go straight to the sink while no object is
-//! open. Objects cannot: RFC 8785 orders members by name, and the caller
+//! Scalars, strings and arrays go straight to the sink unless an ordinary object
+//! is open. Ordinary object members cannot: RFC 8785 orders members by name, and the caller
 //! hands members over in whatever order it holds them. So while any object is
 //! open, canonical bytes are appended to one shared buffer in the order they
 //! are produced, and each open object records where each of its members lies
@@ -26,14 +26,26 @@
 //! So every close costs the sort of that object's own members, and every
 //! byte is copied into the buffer once and out of it once, whatever the
 //! nesting. A top-level array streams element by element, but a top-level
-//! *object* is held whole until it closes, and the sink sees its first byte
-//! only then.
+//! *object* holds its member bytes until it closes. Its opening brace may
+//! already have reached the sink.
+//!
+//! [`Writer::begin_ordered_object`] instead opens a verified-order root without
+//! a sorting frame. Each name is checked by the same UTF-16 comparator, retaining
+//! only the previous unescaped name. Root output streams immediately except
+//! while an ordinary nested object buffers and sorts through the existing walk.
+//! The root's retained name capacity is bounded by the largest root name, not
+//! the sum of previous names or values. Open stacks and nested sorting storage
+//! retain their bounds below; sink-owned storage is additional.
 //!
 //! # Bounds
 //!
 //! Every byte of canonical text is counted once, when it is produced, against
 //! [`Limits::max_bytes`]. The buffer only ever holds produced bytes, so its
 //! length never exceeds the ceiling.
+//! The fixed [`LimitKind::ObjectBytes`] u32 offset bound applies to actual
+//! sorting buffers. It remains in force for ordinary nested objects, while a
+//! verified-order root has no sorting buffer. Its total canonical output can
+//! exceed u32::MAX under a larger configured ceiling.
 //!
 //! Every heap stack the writer grows is bounded by that ceiling as well: the
 //! stack of open containers gains one entry per `[` or `{`, which is produced
@@ -68,7 +80,7 @@ use core::fmt;
 
 use crate::escape::escape_fragment;
 use crate::number::{exact_integer_double, with_double_text};
-use crate::order::{cmp_member_names, Unescaped};
+use crate::order::{cmp_member_names, cmp_names, Unescaped};
 use crate::sink::try_extend;
 use crate::{Error, FixedShape, LimitExceeded, LimitKind, Limits, ProtocolViolation, Sink};
 
@@ -120,6 +132,8 @@ enum Open {
     Array { first: bool },
     /// An object; its members are buffered in the innermost [`Frame`].
     Object,
+    /// The root object verifies member order and has no sorting frame.
+    OrderedObject,
     /// serde's one-member `{"variant":value}` wrapper for an externally
     /// tagged enum. It has one member, so nothing needs sorting and it
     /// streams; `filled` once its value starts.
@@ -145,11 +159,18 @@ enum Task {
     Member { owner: Owner, span: Span },
 }
 
+/// Only the last root name is needed to verify strict increasing order.
+struct OrderedRoot {
+    previous: Option<Vec<u8>>,
+    pending: bool,
+}
+
 /// Writes one RFC 8785 value into a [`Sink`] from pushed events.
 ///
 /// Push exactly one complete value, then call [`Writer::finish`]. Inside an
 /// object, push [`Writer::name`] before each member's value; the writer sorts
-/// the members. A value is a scalar event, or a `begin_*` event, the
+/// the members, or verifies their order for a [`Writer::begin_ordered_object`]
+/// root. A value is a scalar event, or a `begin_*` event, the
 /// container's contents and the matching `end_*` event.
 ///
 /// An event out of order is refused with [`Error::Protocol`]. After any
@@ -183,7 +204,7 @@ pub struct Writer<'s, S: Sink + ?Sized> {
     stack: Vec<Open>,
     /// One frame per [`Open::Object`] on `stack`, in the same order.
     frames: Vec<Frame>,
-    /// Canonical bytes produced while any object is open.
+    /// Canonical bytes produced while ordinary sorting frames are open.
     buffer: Vec<u8>,
     /// The finished members of every open object (see [`Frame`]).
     open_members: Vec<Span>,
@@ -197,6 +218,8 @@ pub struct Writer<'s, S: Sink + ?Sized> {
     started: bool,
     /// Whether an event has been refused.
     refused: bool,
+    /// Present only while a verified-order root is open.
+    ordered: Option<OrderedRoot>,
 }
 
 impl<S: Sink + ?Sized> fmt::Debug for Writer<'_, S> {
@@ -229,6 +252,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             closed_children: Vec::new(),
             started: false,
             refused: false,
+            ordered: None,
         }
     }
 
@@ -360,6 +384,40 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         })
     }
 
+    /// Open a top-level object whose names must arrive in strictly increasing
+    /// UTF-16 code-unit order. The writer verifies every name; use [`Writer::name`]
+    /// and [`Writer::end_object`] as usual. Names and values stream immediately
+    /// except while an ordinary nested object is buffered for sorting.
+    ///
+    /// Root storage retains only the largest name capacity, not prior values.
+    /// The configured canonical-byte ceiling applies to the entire encoding.
+    /// The fixed [`LimitKind::ObjectBytes`] bound still applies to actual nested
+    /// sorting buffers; this root has no such buffer.
+    ///
+    /// Discard sink contents on any error, and accept output only after
+    /// [`Writer::finish`] succeeds.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtocolViolation::OrderedObjectNotRoot`] inside another container;
+    /// otherwise as [`Writer::null`]. A later name can refuse with
+    /// [`Error::MemberNameOutOfOrder`] or [`Error::DuplicateMemberName`].
+    pub fn begin_ordered_object(&mut self) -> Result<(), Error> {
+        self.guard(|writer| {
+            if !writer.stack.is_empty() {
+                return Err(Error::Protocol(ProtocolViolation::OrderedObjectNotRoot));
+            }
+            writer.before_value()?;
+            writer.produce(b"{")?;
+            writer.push_open(Open::OrderedObject)?;
+            writer.ordered = Some(OrderedRoot {
+                previous: None,
+                pending: false,
+            });
+            Ok(())
+        })
+    }
+
     /// Start a member of the innermost object, which must be awaiting a
     /// name. Its value is the next value pushed.
     ///
@@ -367,13 +425,15 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     ///
     /// [`ProtocolViolation::NameOutsideObject`] outside an object,
     /// [`ProtocolViolation::NameWithoutValue`] when the previous name has no
-    /// value yet; otherwise as [`Writer::null`].
+    /// value yet; [`Error::MemberNameOutOfOrder`] or [`Error::DuplicateMemberName`]
+    /// for a verified-order root's non-increasing name; otherwise as [`Writer::null`].
     pub fn name(&mut self, name: &str) -> Result<(), Error> {
         self.guard(|writer| writer.begin_member(name))
     }
 
     /// Close the innermost container, which must be an object: sort its
-    /// members and move them to their destination.
+    /// ordinary members and move them to their destination, or close a
+    /// verified-order root directly in the sink.
     ///
     /// # Errors
     ///
@@ -448,6 +508,12 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
                 }
                 Ok(())
             }
+            Open::OrderedObject => {
+                if !self.ordered_root()?.pending {
+                    return Err(Error::Protocol(ProtocolViolation::ValueWithoutName));
+                }
+                Ok(())
+            }
             Open::Wrapper { filled } => {
                 if *filled {
                     return Err(Error::Internal {
@@ -464,6 +530,10 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     fn after_value(&mut self) -> Result<(), Error> {
         match self.stack.last() {
             Some(Open::Object) => self.end_member(),
+            Some(Open::OrderedObject) => {
+                self.ordered_root()?.pending = false;
+                Ok(())
+            }
             Some(Open::Array { .. } | Open::Wrapper { .. }) | None => Ok(()),
         }
     }
@@ -534,6 +604,9 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
 
     /// Write `"name":` as the start of a new member of the innermost object.
     pub(crate) fn begin_member(&mut self, name: &str) -> Result<(), Error> {
+        if matches!(self.stack.last(), Some(Open::OrderedObject)) {
+            return self.begin_ordered_member(name);
+        }
         if !matches!(self.stack.last(), Some(Open::Object)) {
             return Err(Error::Protocol(ProtocolViolation::NameOutsideObject));
         }
@@ -545,6 +618,49 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         frame.pending = Some(offset);
         self.quoted(name)?;
         self.produce(b":")
+    }
+
+    fn ordered_root(&mut self) -> Result<&mut OrderedRoot, Error> {
+        self.ordered.as_mut().ok_or(Error::Internal {
+            invariant: "an ordered root has verification state",
+        })
+    }
+
+    fn begin_ordered_member(&mut self, name: &str) -> Result<(), Error> {
+        let root = self.ordered_root()?;
+        if root.pending {
+            return Err(Error::Protocol(ProtocolViolation::NameWithoutValue));
+        }
+        let separator = root.previous.is_some();
+        if let Some(previous) = &root.previous {
+            match cmp_names(previous, name.as_bytes()) {
+                core::cmp::Ordering::Less => {}
+                core::cmp::Ordering::Equal => {
+                    let mut repeated = String::new();
+                    repeated
+                        .try_reserve(name.len())
+                        .map_err(|_| Error::Allocation {
+                            requested: name.len(),
+                        })?;
+                    repeated.push_str(name);
+                    return Err(Error::DuplicateMemberName { name: repeated });
+                }
+                core::cmp::Ordering::Greater => return Err(Error::MemberNameOutOfOrder),
+            }
+        }
+        // Count and emit before retaining the name: an oversized untrusted
+        // name hits the canonical ceiling before any verification allocation.
+        if separator {
+            self.produce(b",")?;
+        }
+        self.quoted(name)?;
+        self.produce(b":")?;
+        let root = self.ordered_root()?;
+        let previous = root.previous.get_or_insert_with(Vec::new);
+        previous.clear();
+        try_extend(previous, name.as_bytes())?;
+        root.pending = true;
+        Ok(())
     }
 
     /// The member's value has been written; record the finished member.
@@ -560,6 +676,15 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     }
 
     pub(crate) fn close_object(&mut self) -> Result<(), Error> {
+        if matches!(self.stack.last(), Some(Open::OrderedObject)) {
+            if self.ordered_root()?.pending {
+                return Err(Error::Protocol(ProtocolViolation::ObjectEndedAfterName));
+            }
+            self.produce(b"}")?;
+            self.stack.pop();
+            self.ordered = None;
+            return self.after_value();
+        }
         if !matches!(self.stack.last(), Some(Open::Object)) {
             return Err(Error::Protocol(ProtocolViolation::MismatchedEnd));
         }

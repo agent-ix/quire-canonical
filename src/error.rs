@@ -83,6 +83,8 @@ pub enum ProtocolViolation {
     Incomplete,
     /// An event after the writer had already refused one.
     AfterRefusal,
+    /// The verified-order entry was used inside a container.
+    OrderedObjectNotRoot,
 }
 
 impl fmt::Display for ProtocolViolation {
@@ -96,6 +98,7 @@ impl fmt::Display for ProtocolViolation {
             Self::SecondValue => "a second top-level value was written",
             Self::Incomplete => "the value was not complete",
             Self::AfterRefusal => "an event followed a refused event",
+            Self::OrderedObjectNotRoot => "a verified-order object must be the top-level value",
         })
     }
 }
@@ -139,6 +142,10 @@ pub enum Error {
         /// The repeated name.
         name: String,
     },
+    /// A verified-order object's next name precedes its previous name in
+    /// UTF-16 code-unit order. Equal names use [`Error::DuplicateMemberName`].
+    #[error("object member name is not in increasing UTF-16 code-unit order")]
+    MemberNameOutOfOrder,
     /// A `serde_json` private-token struct, emitted when `serde_json`'s
     /// `arbitrary_precision` or `raw_value` feature is on. Its fields do not
     /// describe the JSON value it stands for, so encoding them would produce
