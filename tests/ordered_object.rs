@@ -261,22 +261,51 @@ fn nested_limits_duplicates_and_number_refusals_are_not_bypassed() {
     }
 }
 
-#[cfg(feature = "std")]
 #[test]
-fn sink_failure_cannot_finish_successfully() {
-    struct Fail;
-    impl Sink for Fail {
-        fn write_bytes(&mut self, _: &[u8]) -> Result<(), Error> {
-            Err(Error::Sink(std::io::Error::other("sink refused")))
-        }
-    }
-    let mut sink = (Sha256::new(), Fail);
-    let mut writer = Writer::new(&mut sink, LIMITS);
-    assert!(matches!(writer.begin_ordered_object(), Err(Error::Sink(_))));
+fn escaping_expansion_obeys_the_canonical_ceiling() {
+    let mut bytes = Vec::new();
+    let mut writer = Writer::new(&mut bytes, Limits::new(11));
+    writer.begin_ordered_object().unwrap();
+    writer.name("a").unwrap();
+    assert!(matches!(
+        writer.string("\u{0}"),
+        Err(Error::Limit(limit)) if limit.kind == LimitKind::CanonicalBytes
+            && limit.bound == 11 && limit.required == 12
+    ));
     assert!(matches!(
         writer.finish(),
         Err(Error::Protocol(ProtocolViolation::AfterRefusal))
     ));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn sink_failure_cannot_finish_successfully() {
+    struct Fail(usize);
+    impl Sink for Fail {
+        fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
+            if bytes.len() > self.0 {
+                return Err(Error::Sink(std::io::Error::other("sink refused")));
+            }
+            self.0 -= bytes.len();
+            Ok(())
+        }
+    }
+    for budget in [0, 5] {
+        let mut sink = (Sha256::new(), Fail(budget));
+        let mut writer = Writer::new(&mut sink, LIMITS);
+        if budget == 0 {
+            assert!(matches!(writer.begin_ordered_object(), Err(Error::Sink(_))));
+        } else {
+            writer.begin_ordered_object().unwrap();
+            writer.name("a").unwrap();
+            assert!(matches!(writer.null(), Err(Error::Sink(_))));
+        }
+        assert!(matches!(
+            writer.finish(),
+            Err(Error::Protocol(ProtocolViolation::AfterRefusal))
+        ));
+    }
 }
 
 #[test]

@@ -11,8 +11,8 @@
 //!
 //! # What streams and what is buffered
 //!
-//! Scalars, strings and arrays go straight to the sink while no object is
-//! open. Ordinary object members cannot: RFC 8785 orders members by name, and the caller
+//! Scalars, strings and arrays go straight to the sink unless an ordinary object
+//! is open. Ordinary object members cannot: RFC 8785 orders members by name, and the caller
 //! hands members over in whatever order it holds them. So while any object is
 //! open, canonical bytes are appended to one shared buffer in the order they
 //! are produced, and each open object records where each of its members lies
@@ -204,7 +204,7 @@ pub struct Writer<'s, S: Sink + ?Sized> {
     stack: Vec<Open>,
     /// One frame per [`Open::Object`] on `stack`, in the same order.
     frames: Vec<Frame>,
-    /// Canonical bytes produced while any object is open.
+    /// Canonical bytes produced while ordinary sorting frames are open.
     buffer: Vec<u8>,
     /// The finished members of every open object (see [`Frame`]).
     open_members: Vec<Span>,
