@@ -11,6 +11,8 @@ Add --check to confirm the committed SVGs are current. The digest in the hero
 figure is the SHA-256 of the canonical text shown there.
 """
 
+import hashlib
+
 from docs_figures import FONTS, SMALL, TITLE, Figure  # noqa: F401
 
 STYLE = "ix-docs"
@@ -23,6 +25,11 @@ ROLES = [
     ("evidence", "outcome", "box"),
     ("ink", "input", "box"),
 ]
+
+
+CANONICAL = b'{"a":1,"b":2.5}'
+_hex = hashlib.sha256(CANONICAL).hexdigest()
+DIGEST = f"{_hex[:8]}…{_hex[-7:]}"
 
 
 def hero():
@@ -38,8 +45,8 @@ def hero():
     f.box(0, 30, 230, 56, "ink", "JSON text", '{"b": 2.50, "a": 1.0}')
     f.box(0, 130, 230, 56, "ink", "same value, other spelling", '{"a": 1, "b": 2.5e0}')
     f.box(300, 80, 170, 56, "logic", "quire-canonical", "sort · number text")
-    f.box(540, 80, 190, 56, "model", "canonical bytes", '{"a":1,"b":2.5}')
-    f.box(800, 80, 180, 56, "evidence", "SHA-256", "85f690f6…9050629")
+    f.box(540, 80, 190, 56, "model", "canonical bytes", CANONICAL.decode())
+    f.box(800, 80, 180, 56, "evidence", "SHA-256", DIGEST)
     f.line([(230, 58), (265, 58), (265, 100), (297, 100)], "ink")
     f.line([(230, 158), (265, 158), (265, 116), (297, 116)], "ink")
     f.line([(470, 108), (537, 108)], "logic")
