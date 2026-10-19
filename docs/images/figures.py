@@ -95,42 +95,75 @@ def pipeline():
 
 
 REPOS = [
-    ("ORCHESTRATION", [("quire-verification", True), ("quire-driver", True), ("quire-integration", True)]),
-    ("BACKENDS", [("quire-contract-codegen", False), ("quire-contract-runtime", False),
-                  ("quire-analyze", False), ("quire-protocol", True), ("quire-mltl", False)]),
-    ("LANGUAGE", [("quire-specification", True), ("quire-spec-language", False), ("quire-contract-ir", False)]),
-    ("FOUNDATIONS", [("quire-exact", False), ("quire-semantic-value", False), ("quire-walk", False),
-                     ("quire-canonical", False), ("quire-verification-contracts", False),
-                     ("quire-observation", False)]),
+    (1, 0, "quire-driver", "the quire command", True),
+    (2, 0, "quire-integration", "tests the whole chain", True),
+    (3, 0, "quire-verification", "plans verification", True),
+    (0, 1, "quire-specification", "the standard", True),
+    (1, 1, "quire-spec-language", "compiler · evaluator", False),
+    (2, 1, "quire-contract-ir", "contract model", False),
+    (3, 1, "quire-contract-codegen", "code · tests · proofs", False),
+    (4, 1, "quire-contract-runtime", "runs generated checks", False),
+    (0, 2, "quire-observation", "qualified observations", False),
+    (1, 2, "quire-protocol", "protocol conformance", True),
+    (2, 2, "quire-analyze", "SMT consistency", False),
+    (0, 3, "quire-mltl", "MLTL over observations", False),
 ]
+FEEDS = [
+    ("quire-specification", "quire-spec-language"),
+    ("quire-spec-language", "quire-contract-ir"),
+    ("quire-contract-ir", "quire-contract-codegen"),
+    ("quire-contract-codegen", "quire-contract-runtime"),
+    ("quire-spec-language", "quire-protocol"),
+    ("quire-contract-ir", "quire-analyze"),
+    ("quire-observation", "quire-protocol"),
+    ("quire-observation", "quire-mltl"),
+]
+SHARED = ["quire-exact", "quire-semantic-value", "quire-walk", "quire-canonical",
+          "quire-verification-contracts"]
 
 
 def ecosystem(here="quire-spec-language"):
-    """The Quire repositories in bands; each band builds on the ones below."""
+    """The Quire repositories: the main chain, its branches, and what runs and shares it."""
     f = Figure(
         "ecosystem",
         980,
-        364,
-        "The Quire repositories in four bands. Foundations: quire-exact, quire-semantic-value, "
-        "quire-walk, quire-canonical, quire-verification-contracts, quire-observation. Language: "
-        "quire-specification, quire-spec-language, quire-contract-ir. Backends: "
-        "quire-contract-codegen, quire-contract-runtime, quire-analyze, quire-protocol, "
-        "quire-mltl. Orchestration: quire-verification, quire-driver, quire-integration.",
+        476,
+        "The Quire repositories. The main chain runs from the standard, quire-specification, to "
+        "the compiler, quire-spec-language, then quire-contract-ir, quire-contract-codegen and "
+        "quire-contract-runtime. quire-spec-language also feeds quire-protocol, and "
+        "quire-contract-ir feeds quire-analyze. quire-observation feeds quire-protocol and "
+        "quire-mltl. Above the chain, quire-driver runs it, quire-integration tests it and "
+        "quire-verification plans verification. Below it, shared libraries used throughout: "
+        "quire-exact, quire-semantic-value, quire-walk, quire-canonical and "
+        "quire-verification-contracts.",
     )
-    y = 0
+    w, h, step = 176, 50, 201
+    rows = {0: 20, 1: 120, 2: 210, 3: 290}
+    where = {}
+    for col, row, name, sub, private in REPOS:
+        x, y = col * step, rows[row]
+        where[name] = (x, y)
+        role = "logic" if name == here else "ink"
+        f.box(x, y, w, h, role, name, sub, dashed=private)
+    for a, b in FEEDS:
+        (ax, ay), (bx, by) = where[a], where[b]
+        if ay == by:
+            f.line([(ax + w, ay + h / 2), (bx - 3, by + h / 2)], "model")
+        else:
+            f.line([(ax + w / 2, ay + h), (bx + w / 2, by - 3)], "model")
+    f.text(0, 12, "ORCHESTRATION", "muted", "mono", SMALL)
+    f.text(0, 112, "THE CHAIN", "muted", "mono", SMALL)
+    f.text(0, 382, "SHARED LIBRARIES · USED THROUGHOUT", "muted", "mono", SMALL)
     gap = 10
-    for band, repos in REPOS:
-        f.text(0, y + 12, band, "muted", "mono", SMALL)
-        widths = [FONTS["title"].width(name, TITLE) + 24 for name, _ in repos]
-        spare = (980 - sum(widths) - gap * (len(repos) - 1)) / len(repos)
-        x = 0
-        for (name, private), w in zip(repos, widths):
-            w = round(w + spare)
-            role = "logic" if name == here else "ink"
-            f.box(x, y + 20, w, 50, role, name, "private" if private else "public", dashed=private)
-            x += w + gap
-        y += 88
-    f.legend(0, 360, [("logic", "this repository", "box"), ("ink", "private", "dash")])
+    widths = [FONTS["title"].width(name, TITLE) + 24 for name in SHARED]
+    spare = (980 - sum(widths) - gap * (len(SHARED) - 1)) / len(SHARED)
+    x = 0
+    for name, w0 in zip(SHARED, widths):
+        w0 = round(w0 + spare)
+        f.box(x, 390, w0, h, "logic" if name == here else "ink", name)
+        x += w0 + gap
+    f.legend(0, 472, [("logic", "this repository", "box"), ("ink", "private", "dash"),
+                      ("model", "feeds", "fill")])
     return f
 
 
