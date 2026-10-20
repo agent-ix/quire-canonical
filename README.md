@@ -3,15 +3,13 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/k8DVhuYBR2)
 
 quire-canonical is a `no_std` Rust crate that encodes a JSON value as its
-canonical byte string, as defined by RFC 8785 (the JSON Canonicalization
-Scheme), and hashes those bytes with SHA-256 while it writes them. It also
-holds the shared reader for untrusted JSON, so the bytes you hash are the
-bytes you parsed.
+canonical byte string, defined by RFC 8785 (the JSON Canonicalization Scheme),
+and hashes the bytes with SHA-256 as it writes them. It also contains the
+shared JSON reader that feeds the encoder.
 
-Any repository that names content by its digest uses it, so that equal content
-gets equal identity. The digest does not change with key order, whitespace or
-number spelling, and it can be computed on input of any depth without
-overflowing the stack or building the whole text in memory first.
+Quire repositories use it to name content by digest. The digest is independent
+of key order, whitespace and number spelling. It is computed in constant stack
+space without building the whole text in memory.
 
 | Input | Canonical bytes | Digest |
 | --- | --- | --- |
@@ -111,7 +109,7 @@ no Unicode normalization. Golden vectors are in
 
 ## Quire ecosystem
 
-quire-canonical is a foundation crate. It depends on no other Quire repository
+quire-canonical depends on no other Quire repository
 and is one of the shared libraries at the bottom of the figure.
 quire-spec-language (public) depends on it.
 
