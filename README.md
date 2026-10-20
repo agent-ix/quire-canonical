@@ -2,19 +2,21 @@
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/k8DVhuYBR2)
 
-quire-canonical turns a JSON value into its one canonical byte string, as
-defined by RFC 8785 (the JSON Canonicalization Scheme), and hashes those bytes
-with SHA-256 while it writes them. `{"b": 2.50, "a": 1.0}` and
-`{"a": 1, "b": 2.5e0}` are the same value spelled two ways; both come out as
-`{"a":1,"b":2.5}` and both get the same digest. It also holds the one shared
-reader for untrusted JSON, so the bytes you hash are the bytes you parsed.
+quire-canonical is a `no_std` Rust crate that encodes a JSON value as its
+canonical byte string, as defined by RFC 8785 (the JSON Canonicalization
+Scheme), and hashes those bytes with SHA-256 while it writes them. It also
+holds the shared reader for untrusted JSON, so the bytes you hash are the
+bytes you parsed.
 
-It exists so that equal content gets equal identity. Anything that is named by
-its content needs a digest that does not
-change with key order, whitespace or number spelling, and that can be computed
-on input of any depth without overflowing the stack or building the whole text
-in memory first. Putting that in one small `no_std` crate means every other
-repository mints identities the same way.
+Any repository that names content by its digest uses it, so that equal content
+gets equal identity. The digest does not change with key order, whitespace or
+number spelling, and it can be computed on input of any depth without
+overflowing the stack or building the whole text in memory first.
+
+| Input | Canonical bytes | Digest |
+| --- | --- | --- |
+| `{"b": 2.50, "a": 1.0}` | `{"a":1,"b":2.5}` | same |
+| `{"a": 1, "b": 2.5e0}` | `{"a":1,"b":2.5}` | same |
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.svg">
@@ -24,11 +26,11 @@ repository mints identities the same way.
 > **Status: public prerelease.** The API is still changing and the crate is not
 > published yet (`publish = false`). Expect breaking changes.
 
-## How a value gets in
+## Input paths
 
-There are four ways to hand a value to the encoder, and all of them end in the
-same `Writer`, which pushes canonical bytes, in order, to a `Sink`. A hasher,
-a `Vec<u8>` and an `io::Write` adapter are sinks, so hashing needs no
+A value reaches the encoder in one of four ways. All four end in the same
+`Writer`, which pushes canonical bytes, in order, to a `Sink`. A hasher, a
+`Vec<u8>` and an `io::Write` adapter are sinks, so hashing needs no
 intermediate string.
 
 <picture>
@@ -36,8 +38,8 @@ intermediate string.
   <img alt="A value reaches the Writer as pushed events, as a Document from read, as a serde_json::Value or through serde for a FixedShape type. The Writer emits canonical bytes in order into a Sink: a SHA-256 hasher, a byte vector or an io::Write." src="docs/images/pipeline-light.svg">
 </picture>
 
-Nothing recurses in proportion to its input and nothing bounds depth: only
-byte limits apply, and a limit refuses the encoding rather than truncating it.
+Nothing recurses in proportion to its input, and depth is unbounded. Only byte
+limits apply, and a value over a limit is refused with an error.
 Arrays and scalars stream to the sink. While an object is open its bytes are
 buffered so its members can be sorted, so a top-level object is held whole
 before the first byte is hashed. See [docs/encoding.md](docs/encoding.md).
@@ -58,7 +60,7 @@ assert_eq!(bytes, "{\"a\":\"ö\",\"b\":1e+21}".as_bytes());
 # Ok::<(), quire_canonical::Error>(())
 ```
 
-Push events yourself, for data whose depth follows its input (from `src/writer.rs`,
+Push events yourself for data whose depth follows its input (from `src/writer.rs`,
 also a doc-test):
 
 ```rust
@@ -89,7 +91,7 @@ To parse untrusted JSON, call `read(bytes, max_input_bytes)`, which returns a
 
 | Item | What it does |
 | --- | --- |
-| `to_vec`, `sha256`, `sha256_with_domain`, `encode` | Encode any `Encode` value to bytes, to a digest, to a domain-labelled digest, or into a `Sink`. |
+| `to_vec`, `sha256`, `sha256_with_domain`, `encode` | Encode any `Encode` value to bytes, to a digest, to a domain-labeled digest, or into a `Sink`. |
 | `Writer` | Push-event encoder; refuses events out of order. |
 | `read`, `Document`, `NodeRef` | The shared reader of untrusted JSON, into an arena tree. Refuses malformed input with the byte offset, and numbers with no finite double with their JSON pointer. |
 | `FixedShape` and `#[derive(FixedShape)]` | Marks serde types whose depth is fixed by their schema; a recursive type fails to compile. |
@@ -107,10 +109,11 @@ integer must travel as a decimal string; strings are escaped per RFC 8785 with
 no Unicode normalization. Golden vectors are in
 [`tests/vectors/jcs-vectors.json`](tests/vectors/jcs-vectors.json).
 
-## The Quire ecosystem
+## Quire ecosystem
 
-quire-canonical is a foundation crate: it depends on no other Quire repository
-and is one of the shared libraries at the bottom of the figure. quire-spec-language (public) depends on it.
+quire-canonical is a foundation crate. It depends on no other Quire repository
+and is one of the shared libraries at the bottom of the figure.
+quire-spec-language (public) depends on it.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/ecosystem-dark.svg">
