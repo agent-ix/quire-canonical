@@ -15,6 +15,12 @@ members = [".", "quire-canonical-derive"]
 # the derive crate as well as the library.
 default-members = [".", "quire-canonical-derive"]
 
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[lints]
+workspace = true
+
 [lib]
 name = "quire_canonical"
 path = "src/lib.rs"

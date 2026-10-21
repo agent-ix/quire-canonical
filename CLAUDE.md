@@ -23,14 +23,13 @@ make build-no-std   # build without std for thumbv7em-none-eabi, with and withou
 make build          # release build
 make clean          # cargo clean
 make deny           # cargo deny check (advisories, bans, licenses, sources)
-make audit-unsafe   # check that every unsafe block has a // SAFETY: comment
-make ci             # fmt-check + lint + test + build-no-std + deny + audit-unsafe + docs
+make ci             # fmt-check + lint + test + build-no-std + deny + docs
 ```
 
 ## Safety scaffolding
 
 - `deny.toml` allow-lists licenses and denies unknown registries/git sources
-- `scripts/check_unsafe_comments.sh` runs in CI and locally via `make audit-unsafe`. Every `unsafe {` block must have a `// SAFETY:` comment within the 3 preceding lines, or be listed in `scripts/unsafe_comment_baseline.txt`. Update the baseline with `bash scripts/check_unsafe_comments.sh --update-baseline`.
+- Workspace Clippy lints deny undocumented unsafe blocks.
 - `rustfmt.toml` uses 100-char width (stable options only). CI fails on drift.
 
 ## Layout
@@ -49,5 +48,4 @@ tests/memory.rs        # peak heap per shape, writer and reader
 tests/drop_value.rs    # drop_value frees everything (counting allocator; `serde_json` feature)
 benches/               # criterion benchmarks (opt-in; add criterion to dev-deps)
 spec/                  # requirements artifacts (from /spec-create-spec)
-scripts/               # local tooling
 ```
