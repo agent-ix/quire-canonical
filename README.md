@@ -122,7 +122,7 @@ quire-spec-language (public) depends on it.
 
 ```bash
 make test       # default (+serde_json), preserve_order, no-std and arbitrary_precision lanes
-make ci         # fmt-check, lint, test, no-std build, deny, audit-unsafe, docs
+make ci         # fmt-check, lint, test, no-std build, deny, docs
 ```
 
 `make help` lists every target. The toolchain is pinned by `rust-toolchain.toml`
