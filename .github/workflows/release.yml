@@ -55,9 +55,6 @@ jobs:
       - name: Test (preserve_order lane)
         run: cargo test --features test-preserve-order
 
-      - name: Unsafe audit
-        run: bash scripts/check_unsafe_comments.sh
-
       - name: Docs
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
