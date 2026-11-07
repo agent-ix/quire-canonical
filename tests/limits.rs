@@ -71,15 +71,15 @@ fn every_smaller_bound_refuses_with_the_byte_limit_and_never_truncates() {
 }
 
 /// The member buffers held for sorting count against the same ceiling: a
-/// top-level object's members are all buffered until it closes, so a refusal
-/// inside it reaches the sink with only the opening brace.
+/// top-level object, brace included, is buffered until it closes, so a refusal
+/// inside it leaves the sink empty.
 #[test]
 fn sort_buffers_are_metered_before_they_reach_the_sink() {
     // 20 bytes is reached while the members are still being buffered.
     let mut sink = Vec::new();
     let refused = encode(&mut sink, &record(), limits(20));
     assert!(matches!(refused, Err(Error::Limit(_))));
-    assert_eq!(sink, b"{");
+    assert!(sink.is_empty());
 }
 
 #[test]
@@ -132,7 +132,10 @@ fn nested_object_buffers_are_refused_on_bytes() {
             ..
         }))
     ));
-    assert_eq!(sink, b"{", "nothing past the outer brace reached the sink");
+    assert!(
+        sink.is_empty(),
+        "nothing of the outer object reached the sink"
+    );
 }
 
 /// The tree encoder's task stack is bounded by the document's nodes, and the

@@ -153,6 +153,13 @@ pub enum Error {
         /// The size of the reservation that failed.
         requested: usize,
     },
+    /// The caller's [`crate::Reservation`] refused a heap growth the writer
+    /// needed. Nothing was allocated for it.
+    #[error("heap reservation of {requested} bytes for canonical output was denied")]
+    ReservationDenied {
+        /// The bytes of growth the reservation was asked for.
+        requested: usize,
+    },
     /// The byte sink refused a write.
     #[cfg(feature = "std")]
     #[error("canonical output sink failed: {0}")]

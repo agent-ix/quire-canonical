@@ -37,6 +37,28 @@ bytes are buffered, so its members can be sorted; a top-level object is
 therefore held whole before the first byte is hashed. The buffered bytes count
 against the byte ceiling; see the crate docs for the full memory bound.
 
+## Caller reservation
+
+`Writer::with_reservation` (and `encode_with_reservation`) takes a
+`Reservation`, a caller's say over the heap the writer holds besides the
+output. The writer calls `Reservation::reserve(bytes)` once before each growth
+of one of its internal lists (its container stack, the sort buffer, member and
+closed-object records, the output walk's task stack) and before the name
+allocation of a duplicate-member refusal, with the bytes by which that list's
+capacity is about to grow. It then grows to exactly that capacity, so the
+bytes asked are the bytes allocated, and their sum is the writer's peak
+working heap: capacity is reused across objects and never returned until the
+writer is finished, dropped or refused, so no byte is asked twice and none is
+released. The `Sink` is the caller's own destination and is never asked about.
+
+A `ReservationDenied` from the hook refuses the event with
+`Error::ReservationDenied { requested }`. Nothing is allocated for the refused
+growth and the writer drops everything it holds. A top-level object reaches the
+sink only after every growth its output needs was admitted, so a refusal
+leaves none of it in the sink; elements of a top-level array before the
+refusal have already streamed. Exact provision admits and one byte less
+refuses. Without a reservation the writer behaves as before.
+
 ## Numbers
 
 A `Value`'s integers follow the integer rule, not `read`'s rule for JSON
