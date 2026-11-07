@@ -60,7 +60,27 @@
 //!   a frame and a closed record: under 32x the canonical length.
 //!
 //! Memory is linear in the canonical length for every shape. Every structure
-//! grows with `try_reserve`, so exhausting memory is a refusal, not an abort.
+//! grows with `try_reserve_exact`, to a capacity the writer chooses by
+//! doubling, so exhausting memory is a refusal, not an abort.
+//!
+//! # Caller reservation
+//!
+//! [`Writer::with_reservation`] takes a [`crate::Reservation`], asked for the
+//! bytes of each growth of each list above (and of the walk's task stack, of
+//! the name a duplicate-member refusal carries, and of the output held back
+//! below) before the growth. Lists keep their capacity between outermost
+//! objects, so an array of objects grows them once, not once per element.
+//!
+//! A streaming writer hands the sink bytes as they become final, so a
+//! refusal part-way through leaves a prefix in it. A metered writer instead
+//! holds the whole output and writes it to the sink in [`Writer::finish`]: a
+//! refusal at any point, for any shape of value, leaves the sink untouched
+//! and drops every list the writer holds. The held output is one more list,
+//! charged like the rest. Output is written once either way; the cost of
+//! holding it is its length in heap, which the reservation sees.
+//!
+//! A caller's own [`crate::Encode`] implementation charges the working lists it
+//! allocates through [`Writer::reserve_list`] and [`Writer::reserve`].
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -69,8 +89,10 @@ use core::fmt;
 use crate::escape::escape_fragment;
 use crate::number::{exact_integer_double, with_double_text};
 use crate::order::{cmp_member_names, Unescaped};
-use crate::sink::try_extend;
-use crate::{Error, FixedShape, LimitExceeded, LimitKind, Limits, ProtocolViolation, Sink};
+use crate::reservation::Provision;
+use crate::{
+    Error, FixedShape, LimitExceeded, LimitKind, Limits, ProtocolViolation, Reservation, Sink,
+};
 
 /// Where one member's canonical bytes (`"name":value`) were written in the
 /// shared buffer. Objects closed inside the member stay in place, so the
@@ -193,6 +215,13 @@ pub struct Writer<'s, S: Sink + ?Sized> {
     closed: Vec<Closed>,
     closed_members: Vec<Span>,
     closed_children: Vec<u32>,
+    /// With a reservation, the output so far: it reaches the sink only when
+    /// the value is finished, so a refusal leaves the sink untouched.
+    staged: Vec<u8>,
+    /// The output walk's task stack, kept between outermost objects.
+    tasks: Vec<Task>,
+    /// The caller's say over every growth of the lists above.
+    provision: Provision<'s>,
     /// Whether the top-level value has started.
     started: bool,
     /// Whether an event has been refused.
@@ -215,6 +244,26 @@ impl<S: Sink + ?Sized> fmt::Debug for Writer<'_, S> {
 impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     /// A writer that feeds `sink` under `limits`.
     pub fn new(sink: &'s mut S, limits: Limits) -> Self {
+        Self::with_provision(sink, limits, Provision::default())
+    }
+
+    /// A writer that feeds `sink` under `limits` and asks `reservation`
+    /// before every growth of its own heap (see [`Reservation`]).
+    ///
+    /// A refused growth refuses the event with [`Error::ReservationDenied`]
+    /// and the writer drops everything it holds. A metered writer holds the
+    /// whole output, every top-level container included, and gives it to the
+    /// sink in [`Writer::finish`], so a refusal leaves the sink untouched.
+    /// That held output is itself charged to the reservation.
+    pub fn with_reservation(
+        sink: &'s mut S,
+        limits: Limits,
+        reservation: &'s mut dyn Reservation,
+    ) -> Self {
+        Self::with_provision(sink, limits, Provision::new(reservation))
+    }
+
+    fn with_provision(sink: &'s mut S, limits: Limits, provision: Provision<'s>) -> Self {
         Self {
             sink,
             limits,
@@ -227,6 +276,9 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             closed: Vec::new(),
             closed_members: Vec::new(),
             closed_children: Vec::new(),
+            staged: Vec::new(),
+            tasks: Vec::new(),
+            provision,
             started: false,
             refused: false,
         }
@@ -253,6 +305,9 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         }
         if !self.started || !self.stack.is_empty() {
             return Err(Error::Protocol(ProtocolViolation::Incomplete));
+        }
+        if !self.staged.is_empty() {
+            self.sink.write_bytes(&self.staged)?;
         }
         Ok(self.produced)
     }
@@ -347,7 +402,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             writer.before_value()?;
             writer.produce(b"{")?;
             let start = buffer_offset(&writer.buffer)?;
-            reserve(&mut writer.frames, 1)?;
+            writer.provision.grow(&mut writer.frames, 1)?;
             writer.push_open(Open::Object)?;
             let frame = Frame {
                 start,
@@ -396,8 +451,35 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         self.guard(|writer| crate::encoder::serialize(writer, value))
     }
 
+    /// Make room in `list`, a working list of the caller's own `Encode`
+    /// implementation, for `additional` more items, asking the reservation
+    /// first like every growth of the writer's own lists. Without a
+    /// reservation it is a plain `try_reserve`-style growth that refuses
+    /// instead of aborting.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReservationDenied`] when the reservation refuses,
+    /// [`Error::Allocation`] when memory runs out. Either refuses the writer
+    /// like any event.
+    pub fn reserve_list<T>(&mut self, list: &mut Vec<T>, additional: usize) -> Result<(), Error> {
+        self.guard(|writer| writer.provision.grow(list, additional))
+    }
+
+    /// Ask the reservation for `bytes` of the caller's own working heap, to be
+    /// allocated right after. A no-op without a reservation.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReservationDenied`] when the reservation refuses; the writer is
+    /// then refused like after any event.
+    pub fn reserve(&mut self, bytes: usize) -> Result<(), Error> {
+        self.guard(|writer| writer.provision.charge(bytes))
+    }
+
     /// Refuse with `error`, found by an event source rather than by the
     /// writer, so no later event is accepted.
+    #[cfg(feature = "serde_json")]
     pub(crate) fn refuse(&mut self, error: Error) -> Result<(), Error> {
         self.guard(|_| Err(error))
     }
@@ -410,8 +492,24 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         let outcome = event(self);
         if outcome.is_err() {
             self.refused = true;
+            self.release();
         }
         outcome
+    }
+
+    /// Drop every list the writer holds. A refused writer accepts no more
+    /// events, so it keeps nothing.
+    fn release(&mut self) {
+        self.stack = Vec::new();
+        self.frames = Vec::new();
+        self.buffer = Vec::new();
+        self.open_members = Vec::new();
+        self.open_children = Vec::new();
+        self.closed = Vec::new();
+        self.closed_members = Vec::new();
+        self.closed_children = Vec::new();
+        self.staged = Vec::new();
+        self.tasks = Vec::new();
     }
 
     /// Write one scalar value with `write`.
@@ -469,7 +567,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     }
 
     fn push_open(&mut self, open: Open) -> Result<(), Error> {
-        reserve(&mut self.stack, 1)?;
+        self.provision.grow(&mut self.stack, 1)?;
         self.stack.push(open);
         Ok(())
     }
@@ -498,9 +596,16 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     pub(crate) fn produce(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.count(bytes.len())?;
         if self.frames.is_empty() {
-            self.sink.write_bytes(bytes)
+            emit(
+                &mut *self.sink,
+                &mut self.staged,
+                &mut self.provision,
+                bytes,
+            )
         } else {
-            try_extend(&mut self.buffer, bytes)
+            self.provision.grow(&mut self.buffer, bytes.len())?;
+            self.buffer.extend_from_slice(bytes);
+            Ok(())
         }
     }
 
@@ -554,7 +659,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         let start = frame.pending.take().ok_or(Error::Internal {
             invariant: "a member value follows its name",
         })?;
-        reserve(&mut self.open_members, 1)?;
+        self.provision.grow(&mut self.open_members, 1)?;
         self.open_members.push(Span { start, end });
         Ok(())
     }
@@ -590,9 +695,14 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             let [left, right] = pair else { continue };
             let member = span_bytes(buffer, *left)?;
             if cmp_member_names(member, span_bytes(buffer, *right)?).is_eq() {
-                let name: Vec<u8> = Unescaped::member_name(member).collect();
+                let mut name = Vec::new();
+                self.provision
+                    .grow(&mut name, Unescaped::member_name(member).count())?;
+                name.extend(Unescaped::member_name(member));
                 return Err(Error::DuplicateMemberName {
-                    name: String::from_utf8_lossy(&name).into_owned(),
+                    name: String::from_utf8(name).unwrap_or_else(|invalid| {
+                        String::from_utf8_lossy(invalid.as_bytes()).into_owned()
+                    }),
                 });
             }
         }
@@ -602,9 +712,15 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         self.count(member_count.max(1))?;
         if self.frames.is_empty() {
             // The outermost object: its entries are the whole of both stacks.
-            let members = core::mem::take(&mut self.open_members);
-            let children = core::mem::take(&mut self.open_children);
+            // Both lists go back empty, with their capacity, so the next
+            // outermost object reuses it.
+            let mut members = core::mem::take(&mut self.open_members);
+            let mut children = core::mem::take(&mut self.open_children);
             self.write_out(&members, &children)?;
+            members.clear();
+            children.clear();
+            self.open_members = members;
+            self.open_children = children;
         } else {
             let members = slice_of(
                 &self.open_members,
@@ -623,29 +739,50 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             let closed = Closed {
                 start: frame.start,
                 end: buffer_offset(&self.buffer)?,
-                members: append(&mut self.closed_members, members)?,
-                children: append(&mut self.closed_children, children)?,
+                members: append(&mut self.provision, &mut self.closed_members, members)?,
+                children: append(&mut self.provision, &mut self.closed_children, children)?,
             };
             self.open_members.truncate(frame.members as usize);
             self.open_children.truncate(frame.children as usize);
             let id = index_u32(self.closed.len())?;
-            reserve(&mut self.closed, 1)?;
+            self.provision.grow(&mut self.closed, 1)?;
             self.closed.push(closed);
-            reserve(&mut self.open_children, 1)?;
+            self.provision.grow(&mut self.open_children, 1)?;
             self.open_children.push(id);
         }
         self.after_value()
     }
 
     /// Write the outermost object, just closed with `members` (sorted) and
-    /// `children`, to the sink in canonical order, then clear the buffer. One
-    /// walk with an explicit task stack: each object's members in sorted
+    /// `children`, to the output in canonical order, then clear the buffer.
+    /// One walk with an explicit task stack: each object's members in sorted
     /// order, each member's bytes with the objects closed inside it replaced
     /// by their own sorted text. The stack holds one entry per open level of
-    /// the walk and one per child object of the member being written.
+    /// the walk and one per child object of the member being written. It is
+    /// kept between objects, with its capacity.
     fn write_out(&mut self, members: &[Span], children: &[u32]) -> Result<(), Error> {
-        let mut tasks = Vec::new();
-        reserve(&mut tasks, 1)?;
+        let mut provision = core::mem::take(&mut self.provision);
+        let mut tasks = core::mem::take(&mut self.tasks);
+        let outcome = self.walk(&mut provision, &mut tasks, members, children);
+        tasks.clear();
+        self.provision = provision;
+        self.tasks = tasks;
+        outcome?;
+        self.buffer.clear();
+        self.closed.clear();
+        self.closed_members.clear();
+        self.closed_children.clear();
+        Ok(())
+    }
+
+    fn walk(
+        &mut self,
+        provision: &mut Provision<'_>,
+        tasks: &mut Vec<Task>,
+        members: &[Span],
+        children: &[u32],
+    ) -> Result<(), Error> {
+        provision.grow(tasks, 1)?;
         tasks.push(Task::Body {
             owner: Owner::Root,
             next: 0,
@@ -655,18 +792,18 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
                 Task::Bytes(start, end) => {
                     if start < end {
                         let bytes = span_bytes(&self.buffer, Span { start, end })?;
-                        self.sink.write_bytes(bytes)?;
+                        emit(&mut *self.sink, &mut self.staged, provision, bytes)?;
                     }
                 }
                 Task::Body { owner, next } => {
                     let (own_members, _) = self.lists(owner, members, children)?;
                     match own_members.get(next as usize).copied() {
-                        None => self.sink.write_bytes(b"}")?,
+                        None => emit(&mut *self.sink, &mut self.staged, provision, b"}")?,
                         Some(span) => {
                             if next > 0 {
-                                self.sink.write_bytes(b",")?;
+                                emit(&mut *self.sink, &mut self.staged, provision, b",")?;
                             }
-                            reserve(&mut tasks, 2)?;
+                            provision.grow(tasks, 2)?;
                             tasks.push(Task::Body {
                                 owner,
                                 next: next.saturating_add(1),
@@ -691,7 +828,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
                     let first = starts_by(span.start);
                     let last = starts_by(span.end);
                     let inside = own_children.get(first..last).unwrap_or_default();
-                    reserve(&mut tasks, inside.len().saturating_mul(2).saturating_add(1))?;
+                    provision.grow(tasks, inside.len().saturating_mul(2).saturating_add(1))?;
                     let mut cursor = span.end;
                     for child in inside.iter().rev() {
                         let nested = self.closed_at(*child)?;
@@ -706,10 +843,6 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
                 }
             }
         }
-        self.buffer.clear();
-        self.closed.clear();
-        self.closed_members.clear();
-        self.closed_children.clear();
         Ok(())
     }
 
@@ -765,6 +898,23 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     }
 }
 
+/// Send finished canonical bytes to the sink, or hold them in `staged` while
+/// a reservation is in force.
+fn emit<S: Sink + ?Sized>(
+    sink: &mut S,
+    staged: &mut Vec<u8>,
+    provision: &mut Provision<'_>,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    if provision.is_metered() {
+        provision.grow(staged, bytes.len())?;
+        staged.extend_from_slice(bytes);
+        Ok(())
+    } else {
+        sink.write_bytes(bytes)
+    }
+}
+
 /// The current end of the buffer as a 32-bit offset.
 fn buffer_offset(buffer: &[u8]) -> Result<u32, Error> {
     u32::try_from(buffer.len()).map_err(|_| {
@@ -801,18 +951,16 @@ fn slice_of<T>(list: &[T], span: Span) -> Result<&[T], Error> {
 }
 
 /// Append `items` to `list`, returning where they landed.
-fn append<T: Copy>(list: &mut Vec<T>, items: &[T]) -> Result<Span, Error> {
+fn append<T: Copy>(
+    provision: &mut Provision<'_>,
+    list: &mut Vec<T>,
+    items: &[T],
+) -> Result<Span, Error> {
     let start = index_u32(list.len())?;
-    reserve(list, items.len())?;
+    provision.grow(list, items.len())?;
     list.extend_from_slice(items);
     Ok(Span {
         start,
         end: index_u32(list.len())?,
-    })
-}
-
-fn reserve<T>(list: &mut Vec<T>, additional: usize) -> Result<(), Error> {
-    list.try_reserve(additional).map_err(|_| Error::Allocation {
-        requested: core::mem::size_of::<T>().saturating_mul(additional),
     })
 }

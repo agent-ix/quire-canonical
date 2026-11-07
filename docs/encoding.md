@@ -37,6 +37,43 @@ bytes are buffered, so its members can be sorted; a top-level object is
 therefore held whole before the first byte is hashed. The buffered bytes count
 against the byte ceiling; see the crate docs for the full memory bound.
 
+## Caller reservation
+
+`Writer::with_reservation` (and `encode_with_reservation`) takes a
+`Reservation`, a caller's say over the heap the writer holds besides the
+output. The writer calls `Reservation::reserve(bytes)` once before each growth
+of one of its internal lists (its container stack, the sort buffer, member and
+closed-object records, the output walk's task stack, the held output) and
+before the name allocation of a duplicate-member refusal, with the full
+capacity in bytes that growth asks the allocator for. It then grows to exactly
+that capacity, so the bytes asked are the bytes requested from the allocator,
+and their sum bounds the writer's peak heap (a growth that copies holds the
+old and the new block at once, and the full charge covers that). Capacity is
+reused across objects, so an array of objects regrows nothing per element, and
+is dropped when the writer is finished, dropped or refused. The `Sink` is the
+caller's own destination and is never asked about.
+
+An `Encode` implementation that keeps working lists of its own charges them
+with `Writer::reserve_list` (grow a `Vec` through the reservation) or
+`Writer::reserve` (charge bytes about to be allocated). The crate's own
+`Encode` impls for `serde_json::Value`, `Document` and `NodeRef` do.
+
+A `ReservationDenied` from the hook refuses the event with
+`Error::ReservationDenied { requested }`. Nothing is allocated for the refused
+growth and the writer drops everything it holds. A metered writer holds the
+whole output and writes it to the sink in `finish`, so a refusal leaves the
+sink untouched for every shape of value, top-level arrays and enum wrappers
+included. That costs the output's length in heap (charged) and nothing else:
+no second walk, and the output is written once.
+
+Without a reservation the writer still streams: scalars and arrays reach the
+sink as they are produced; a top-level object's opening brace reaches it at
+once and its members when the object closes.
+Two things differ from the writer before the reservation hook existed, for
+every writer: lists grow by doubling from a minimum of 4 with `try_reserve_exact`
+instead of `Vec`'s own policy, and a writer that refuses an event drops its
+buffers at once instead of at drop.
+
 ## Numbers
 
 A `Value`'s integers follow the integer rule, not `read`'s rule for JSON

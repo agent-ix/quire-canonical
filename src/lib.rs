@@ -98,6 +98,7 @@ mod identity;
 mod number;
 mod order;
 mod read;
+mod reservation;
 mod shape;
 mod sink;
 #[cfg(feature = "serde_json")]
@@ -119,6 +120,7 @@ pub use crate::identity::{
 pub use crate::read::{
     read, Document, Items, Malformed, Members, Node, NodeRef, Number, ReadError,
 };
+pub use crate::reservation::{Reservation, ReservationDenied};
 pub use crate::shape::{deepest, nest, FixedShape};
 pub use crate::sink::Sink;
 #[cfg(feature = "std")]
@@ -209,6 +211,27 @@ where
     T: Encode + ?Sized,
 {
     let mut writer = Writer::new(sink, limits);
+    value.encode_into(&mut writer)?;
+    writer.finish()
+}
+
+/// As [`encode`], with the writer asking `reservation` before every growth of
+/// its own heap (see [`Writer::with_reservation`]).
+///
+/// # Errors
+///
+/// As [`encode`], and [`Error::ReservationDenied`] when `reservation` refuses.
+pub fn encode_with_reservation<S, T>(
+    sink: &mut S,
+    value: &T,
+    limits: Limits,
+    reservation: &mut dyn Reservation,
+) -> Result<u64, Error>
+where
+    S: Sink + ?Sized,
+    T: Encode + ?Sized,
+{
+    let mut writer = Writer::with_reservation(sink, limits, reservation);
     value.encode_into(&mut writer)?;
     writer.finish()
 }
