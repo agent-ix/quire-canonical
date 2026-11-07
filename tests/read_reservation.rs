@@ -63,6 +63,8 @@ struct Recorder {
     deny: Option<usize>,
     requests: Vec<usize>,
     live_when_asked: Vec<usize>,
+    /// The most heap live above the baseline during the last `recorded` read.
+    peak: usize,
 }
 
 impl Recorder {
@@ -74,6 +76,7 @@ impl Recorder {
             deny,
             requests,
             live_when_asked,
+            peak: 0,
         }
     }
 
@@ -101,9 +104,11 @@ const AMPLE: u64 = u64::MAX;
 /// is returned with the heap live once the outcome is dropped.
 fn recorded(input: &[u8], deny: Option<usize>) -> (Result<(), ReadError>, Recorder, usize) {
     let mut recorder = Recorder::new(deny);
+    PEAK.store(recorder.baseline, Ordering::SeqCst);
     let outcome = read_with_reservation(input, AMPLE, &mut recorder).map(drop);
     let after = CURRENT.load(Ordering::SeqCst);
     let live = after - recorder.baseline;
+    recorder.peak = PEAK.load(Ordering::SeqCst) - recorder.baseline;
     (outcome, recorder, live)
 }
 
@@ -116,6 +121,15 @@ const SHAPES: &[(&str, &str)] = &[
     ("array item", "[1,2,3,4,5]"),
     ("object member", "{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":5}"),
     ("nested", "{\"k\":[1,{\"x\":\"y\"},[[]]],\"j\":null}"),
+    // Escapes decode into text after the plain run before them was charged.
+    (
+        "escaped text",
+        "\"tab\\there \\u00e9 \\ud83d\\ude00 and a long enough tail\"",
+    ),
+    (
+        "escaped names",
+        "{\"a\\nb\":\"\\u0041\\\\\",\"c\\/d\":[\"\\\"\"]}",
+    ),
 ];
 
 #[test]
@@ -127,6 +141,7 @@ fn reader_provision_is_charged_before_each_growth_and_a_denial_leaves_nothing() 
     first_growths_are_the_capacity_allocated();
     in_budget_reads_match_the_unmetered_reader();
     refusals_are_unchanged_in_budget();
+    error_paths_charge_their_pointer_and_lexeme();
     bounded_reads_name_the_limit_and_required_bytes();
     deep_inputs_read_on_a_small_stack();
     the_document_keeps_what_the_reader_charged_for();
@@ -171,6 +186,14 @@ fn every_growth_is_asked_before_it_happens_and_denial_leaves_nothing(name: &str,
         );
         charged += bytes;
     }
+    // The charge is an upper bound on the peak, checked over the whole read:
+    // an allocation after the last request, or one a freed block's slack
+    // would hide from the per-request check, shows here.
+    assert!(
+        recorder.peak <= total,
+        "{name}: peak heap {} above the {total} charged",
+        recorder.peak
+    );
     // Denying any one request refuses with that request's bytes, keeps no
     // heap and returns no document.
     for index in 0..recorder.requests.len() {
@@ -231,12 +254,24 @@ fn in_budget_reads_match_the_unmetered_reader() {
 
 fn refusals_are_unchanged_in_budget() {
     let cases: &[(&[u8], Malformed, usize)] = &[
-        (b"{\"a\":1,\"a\":2}", Malformed::DuplicateName, 7),
         (b"[\"\xff\"]", Malformed::InvalidUtf8, 2),
         (b"[\"\\q\"]", Malformed::InvalidEscape, 2),
         (b"[1.]", Malformed::InvalidNumber, 1),
         (b"[1] 2", Malformed::TrailingContent, 4),
     ];
+    let duplicate = ReadError::DuplicateName {
+        offset: 7,
+        pointer: "/a".into(),
+    };
+    assert_eq!(
+        read(br#"{"a":1,"a":2}"#, AMPLE).expect_err("plain"),
+        duplicate
+    );
+    let mut recorder = Recorder::new(None);
+    assert_eq!(
+        read_with_reservation(br#"{"a":1,"a":2}"#, AMPLE, &mut recorder).expect_err("metered"),
+        duplicate
+    );
     for (input, kind, offset) in cases {
         let expected = ReadError::Malformed {
             offset: *offset,
@@ -255,17 +290,41 @@ fn refusals_are_unchanged_in_budget() {
     let metered = read_with_reservation(b"[[1e400]]", AMPLE, &mut recorder).expect_err("metered");
     assert_eq!(plain, metered);
     assert!(matches!(plain, ReadError::NumberOutOfRange { .. }));
-    // The pointer and lexeme the refusal carries are asked for too.
-    let (_, ample, _) = recorded(b"[[1e400]]", None);
-    let _ = ample;
-    let mut recorder = Recorder::new(None);
-    let _ = read_with_reservation(b"[[1e400]]", AMPLE, &mut recorder);
-    let last = recorder.requests.len() - 1;
-    let mut denying = Recorder::new(Some(last));
-    assert!(matches!(
-        read_with_reservation(b"[[1e400]]", AMPLE, &mut denying),
-        Err(ReadError::ReservationDenied { .. })
-    ));
+}
+
+/// The pointer and lexeme a refusal carries, and the steps list that builds
+/// the pointer, are asked for too: the request sequence is exact, every
+/// denial returns that request's bytes and leaves no heap, and the charge
+/// bounds the peak.
+fn error_paths_charge_their_pointer_and_lexeme() {
+    // `[[1e400]]`: stack (4 x 16), steps (4 x 24, an index step each for the
+    // two arrays; the number's text is never appended), pointer "/0/0" (4), lexeme "1e400" (5).
+    let (outcome, recorder, _) = recorded(b"[[1e400]]", None);
+    assert!(matches!(outcome, Err(ReadError::NumberOutOfRange { .. })));
+    assert_eq!(recorder.requests, [64, 96, 4, 5]);
+    // `[{"k":1,"k":2}]`: the sort buffer, then steps for the repeated name
+    // and the two open containers, and the pointer "/0/k".
+    let (outcome, duplicate, _) = recorded(br#"[{"k":1,"k":2}]"#, None);
+    assert!(matches!(outcome, Err(ReadError::DuplicateName { .. })));
+    assert_eq!(duplicate.requests.last().copied(), Some(4));
+    for (input, log) in [
+        (&b"[[1e400]]"[..], &recorder),
+        (br#"[{"k":1,"k":2}]"#, &duplicate),
+    ] {
+        assert!(log.peak <= log.total(), "{input:?}: peak {}", log.peak);
+        for index in 0..log.requests.len() {
+            let (outcome, denying, live) = recorded(input, Some(index));
+            assert!(
+                matches!(
+                    outcome,
+                    Err(ReadError::ReservationDenied { requested }) if requested == log.requests[index]
+                ),
+                "{input:?}: request {index}: {outcome:?}"
+            );
+            assert_eq!(live, 0, "{input:?}: request {index} kept heap");
+            assert_eq!(denying.requests.len(), index + 1);
+        }
+    }
 }
 
 fn bounded_reads_name_the_limit_and_required_bytes() {

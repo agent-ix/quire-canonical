@@ -25,7 +25,8 @@
 //! of its lists: the nodes, the child ids and object members, the decoded
 //! text, the open-container stack, the children of open containers, the
 //! duplicate-name sort buffer, and the pointer and lexeme a
-//! [`ReadError::NumberOutOfRange`] carries. The unit is the same as the
+//! [`ReadError::NumberOutOfRange`] or [`ReadError::DuplicateName`] carries.
+//! The unit is the same as the
 //! writer's: bytes of the full new capacity, element size times new
 //! capacity, charged at every growth and never credited back. The reader
 //! grows each list to exactly the capacity it computed (doubling, at least
@@ -36,7 +37,10 @@
 //! growth that copies holds the old and the new block at once. When the read
 //! returns, the open-container stack, the scratch lists and the sort buffer
 //! are dropped, and the [`Document`] keeps the rest,
-//! [`Document::retained_bytes`]. A meter that does not refund therefore
+//! [`Document::retained_bytes`]. A refusal that carries a pointer or lexeme
+//! ([`ReadError::NumberOutOfRange`], [`ReadError::DuplicateName`]) keeps those
+//! charged strings for as long as the error lives; they are not part of the
+//! document. A meter that does not refund therefore
 //! already holds the document's charge and more; a caller whose meter
 //! refunds can release down to `retained_bytes` when the read returns, and
 //! the rest when it drops the document. Decoding or copying the document
@@ -68,7 +72,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::reservation::Provision;
+use crate::reservation::{Provision, Refusal};
 use crate::{
     Encode, Error, LimitExceeded, LimitKind, Reservation, ReservationDenied, Sink, Writer,
 };
@@ -106,6 +110,16 @@ pub enum ReadError {
         /// The number's exact source text, such as `-1e400`.
         lexeme: String,
     },
+    /// Two members of one object have the same name (RFC 8785 requires
+    /// I-JSON). Identified like [`ReadError::NumberOutOfRange`]: by where the
+    /// repeat sits.
+    #[error("duplicate member name at {pointer:?} (byte {offset})")]
+    DuplicateName {
+        /// The byte offset of the later member's name.
+        offset: usize,
+        /// The later member's location as an RFC 6901 JSON pointer.
+        pointer: String,
+    },
     /// A heap reservation for the tree failed.
     #[error("allocation of {requested} bytes for the JSON tree failed")]
     Allocation {
@@ -123,12 +137,12 @@ pub enum ReadError {
     },
 }
 
-/// The reader's refusal for a writer-side provision error.
-fn from_provision(error: Error) -> ReadError {
-    match error {
-        Error::ReservationDenied { requested } => ReadError::ReservationDenied { requested },
-        Error::Allocation { requested } => ReadError::Allocation { requested },
-        _ => ReadError::Allocation { requested: 0 },
+impl From<Refusal> for ReadError {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Denied { requested } => Self::ReservationDenied { requested },
+            Refusal::Allocation { requested } => Self::Allocation { requested },
+        }
     }
 }
 
@@ -150,8 +164,6 @@ pub enum Malformed {
     LoneSurrogate,
     /// A number that does not follow the RFC 8259 number grammar.
     InvalidNumber,
-    /// A member name already used earlier in the same object.
-    DuplicateName,
     /// Content after the one top-level value.
     TrailingContent,
 }
@@ -166,7 +178,6 @@ impl fmt::Display for Malformed {
             Self::InvalidEscape => "invalid escape",
             Self::LoneSurrogate => "lone surrogate escape",
             Self::InvalidNumber => "invalid number",
-            Self::DuplicateName => "duplicate member name",
             Self::TrailingContent => "content after the JSON value",
         })
     }
@@ -663,7 +674,7 @@ impl<'i, 'r> Parser<'i, 'r> {
     fn append(&mut self, piece: &str) -> Result<(), ReadError> {
         self.provision
             .grow_text(&mut self.text, piece.len())
-            .map_err(from_provision)?;
+            .map_err(ReadError::from)?;
         self.text.push_str(piece);
         Ok(())
     }
@@ -675,7 +686,7 @@ impl<'i, 'r> Parser<'i, 'r> {
     /// The refusal for the number `literal` at `offset`, with its JSON pointer.
     fn number_out_of_range(&mut self, offset: usize, literal: &str) -> ReadError {
         match self
-            .pointer()
+            .pointer(None)
             .and_then(|pointer| Ok((pointer, self.owned(literal)?)))
         {
             Ok((pointer, lexeme)) => ReadError::NumberOutOfRange {
@@ -693,13 +704,15 @@ impl<'i, 'r> Parser<'i, 'r> {
         let mut copy = String::new();
         self.provision
             .grow_text(&mut copy, text.len())
-            .map_err(from_provision)?;
+            .map_err(ReadError::from)?;
         copy.push_str(text);
         Ok(copy)
     }
 
-    /// The RFC 6901 pointer of the value being read, from the open containers.
-    fn pointer(&mut self) -> Result<String, ReadError> {
+    /// The RFC 6901 pointer of the value being read, from the open containers,
+    /// below the member `name` of the object whose members start at
+    /// `children_start` on `scratch_members` when given.
+    fn pointer(&mut self, below: Option<(Range, usize)>) -> Result<String, ReadError> {
         enum Step {
             Index(usize),
             Name(Range),
@@ -711,18 +724,31 @@ impl<'i, 'r> Parser<'i, 'r> {
         let mut steps = Vec::new();
         let mut items_end = self.scratch_items.len();
         let mut members_end = self.scratch_members.len();
+        if let Some((name, children_start)) = below {
+            self.provision
+                .grow(&mut steps, 1)
+                .map_err(ReadError::from)?;
+            steps.push(Step::Name(name));
+            // The object being closed still has its members on the shared
+            // list; the ones below it belong to the objects around it.
+            members_end = children_start;
+        }
         for open in self.stack.iter().rev() {
             if open.object {
                 let member = members_end
                     .checked_sub(1)
                     .and_then(|index| self.scratch_members.get(index));
                 if let Some(member) = member {
-                    self.provision.grow(&mut steps, 1).map_err(from_provision)?;
+                    self.provision
+                        .grow(&mut steps, 1)
+                        .map_err(ReadError::from)?;
                     steps.push(Step::Name(member.name));
                 }
                 members_end = open.start;
             } else {
-                self.provision.grow(&mut steps, 1).map_err(from_provision)?;
+                self.provision
+                    .grow(&mut steps, 1)
+                    .map_err(ReadError::from)?;
                 steps.push(Step::Index(items_end.saturating_sub(open.start)));
                 items_end = open.start;
             }
@@ -749,7 +775,7 @@ impl<'i, 'r> Parser<'i, 'r> {
         let mut pointer = String::new();
         self.provision
             .grow_text(&mut pointer, length)
-            .map_err(from_provision)?;
+            .map_err(ReadError::from)?;
         for step in steps.iter().rev() {
             pointer.push('/');
             match step {
@@ -874,7 +900,7 @@ impl<'i, 'r> Parser<'i, 'r> {
                 let object = byte == b'{';
                 self.provision
                     .grow(&mut self.stack, 1)
-                    .map_err(from_provision)?;
+                    .map_err(ReadError::from)?;
                 self.stack.push(OpenContainer {
                     object,
                     start: if object {
@@ -913,7 +939,7 @@ impl<'i, 'r> Parser<'i, 'r> {
         let id = self.slots.len();
         self.provision
             .grow(&mut self.slots, 1)
-            .map_err(from_provision)?;
+            .map_err(ReadError::from)?;
         self.slots.push(slot);
         Ok(id)
     }
@@ -934,7 +960,7 @@ impl<'i, 'r> Parser<'i, 'r> {
             Some(OpenContainer { object: false, .. }) => {
                 self.provision
                     .grow(&mut self.scratch_items, 1)
-                    .map_err(from_provision)?;
+                    .map_err(ReadError::from)?;
                 self.scratch_items.push(id);
             }
             None => {}
@@ -956,7 +982,7 @@ impl<'i, 'r> Parser<'i, 'r> {
         self.position += 1;
         self.provision
             .grow(&mut self.scratch_members, 1)
-            .map_err(from_provision)?;
+            .map_err(ReadError::from)?;
         self.scratch_members.push(PendingMember {
             name,
             offset,
@@ -980,7 +1006,7 @@ impl<'i, 'r> Parser<'i, 'r> {
             let start = self.members.len();
             self.provision
                 .grow(&mut self.members, pending.len())
-                .map_err(from_provision)?;
+                .map_err(ReadError::from)?;
             self.members
                 .extend(pending.iter().map(|member| (member.name, member.id)));
             self.scratch_members.truncate(open.start);
@@ -993,7 +1019,7 @@ impl<'i, 'r> Parser<'i, 'r> {
             let start = self.items.len();
             self.provision
                 .grow(&mut self.items, items.len())
-                .map_err(from_provision)?;
+                .map_err(ReadError::from)?;
             self.items.extend_from_slice(items);
             self.scratch_items.truncate(open.start);
             Slot::Array(Range {
@@ -1024,23 +1050,26 @@ impl<'i, 'r> Parser<'i, 'r> {
         self.order.clear();
         self.provision
             .grow(&mut self.order, children.len())
-            .map_err(from_provision)?;
+            .map_err(ReadError::from)?;
         self.order.extend(0..children.len());
         self.order
             .sort_unstable_by(|left, right| name_of(*left).cmp(&name_of(*right)));
+        let mut repeat = None;
         for pair in self.order.windows(2) {
             let [left, right] = pair else { continue };
             let (left_name, _) = name_of(*left);
             let (right_name, later) = name_of(*right);
             if left_name == right_name {
                 // Sorted by (name, offset), so `right` is the later one.
-                return Err(ReadError::Malformed {
-                    offset: later,
-                    kind: Malformed::DuplicateName,
-                });
+                repeat = children.get(*right).map(|member| (member.name, later));
+                break;
             }
         }
-        Ok(())
+        let Some((name, offset)) = repeat else {
+            return Ok(());
+        };
+        let pointer = self.pointer(Some((name, start)))?;
+        Err(ReadError::DuplicateName { offset, pointer })
     }
 
     /// Read the string starting at the current `"`, decoding it into `text`.

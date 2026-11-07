@@ -12,6 +12,7 @@ use core::fmt;
 
 /// Which configured limit an encoding reached.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum LimitKind {
     /// The number of canonical output bytes ([`crate::Limits::max_bytes`]).
     CanonicalBytes,

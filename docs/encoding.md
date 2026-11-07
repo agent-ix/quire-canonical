@@ -84,7 +84,8 @@ the reservation is not asked anything. Past that, the reader asks
 `Reservation::reserve(bytes)` once before each growth of one of its lists
 (nodes, child ids, object members, decoded text, the open-container stack, the
 children of open containers, the duplicate-name sort buffer, and the pointer
-and lexeme of a number-out-of-range refusal). The unit is the writer's: the
+and lexeme of a number-out-of-range refusal, and the pointer of a
+duplicate-name refusal). The unit is the writer's: the
 bytes of the full new capacity, element size times new capacity, charged at
 each growth and never credited back, with each list grown to exactly that
 capacity. A denial is `ReadError::ReservationDenied { requested }`; nothing
@@ -94,7 +95,9 @@ is the same with a cumulative byte count, refusing with `ReadError::Limit`
 (`LimitKind::WorkingBytes`, `bound` the provision, `required` the total
 including the refused growth).
 
-The scratch lists are dropped when the read returns; the `Document` keeps its
+A `NumberOutOfRange` or `DuplicateName` refusal carries a charged JSON pointer
+(and lexeme), which it keeps for as long as the error lives; they are not
+part of the document. The scratch lists are dropped when the read returns; the `Document` keeps its
 node, child, member and text lists, `Document::retained_bytes`. A meter that
 does not refund already holds the document's charge; a refunding meter can
 release down to `retained_bytes` and the rest when the document drops.
