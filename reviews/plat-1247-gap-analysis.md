@@ -54,3 +54,14 @@ AC to test trace:
 | ID | Severity | Summary | Refs |
 | --- | --- | --- | --- |
 | FND-001 | medium | AC2 decoded-text growth is tested only for unescaped runs, and the NumberOutOfRange pointer/lexeme growth only by variant. Mutation probes removing the charge on the escape path and on the pointer `steps` list leave the suite green (see SR-3406 FND-001, FND-002). Add an escaped-string shape (e.g. `"a\\nb\\u00e9..."`) to SHAPES and run the deny sweep over `[[1e400]]` | tests/read_reservation.rs:112-119, tests/read_reservation.rs:258-268, src/read.rs:1100, src/read.rs:720 |
+
+## Dispositions
+
+Round 1, PR head 26b4d28905eecd86cb6272938f5d74ada093f2d9. AC1-AC5 remain
+met. AC3 now carries the duplicate-name refusal as
+`ReadError::DuplicateName { offset, pointer }` (typed and located), identical
+metered and unmetered. No new findings.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | Escaped text and escaped names shapes run the full charge, peak and deny sweeps; the NumberOutOfRange and DuplicateName pointer paths have exact or swept request checks; mutations go red |

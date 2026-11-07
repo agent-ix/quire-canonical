@@ -70,3 +70,35 @@ paths (escaped text, the out-of-range pointer) unprotected against regression.
 | FND-005 | low | `LimitKind` is a public enum without `#[non_exhaustive]`, and the PR adds `WorkingBytes` with the crate still at 0.3.0. A downstream exhaustive `match` on it stops compiling. Mark it non_exhaustive or bump the minor version with the release | src/error.rs:15-23, Cargo.toml:3 |
 | FND-006 | low | Dead code in the test: `let (_, ample, _) = recorded(b"[[1e400]]", None); let _ = ample;` does nothing | tests/read_reservation.rs:259-260 |
 | FND-007 | low | The retention text covers the Document and the dropped scratch lists but not a `NumberOutOfRange` error, which keeps the charged pointer and lexeme Strings after the read returns. A refunding meter following the docs would release that charge while the error still holds it | docs/encoding.md:96-102, src/read.rs:35-44 |
+
+## Dispositions
+
+Round 1, PR head 26b4d28905eecd86cb6272938f5d74ada093f2d9 (squashed onto base
+75fd64a0; fix commit 26b4d28). Evidence: release-mode read_reservation,
+memory, read, reservation, depth and limits pass; clippy `-D warnings` and
+`cargo fmt --check` clean. Mutation probes, each reverted: uncharged escape
+`push_str` goes red (tests/read_reservation.rs:182); uncharged `steps` in the
+duplicate-name `below` branch goes red (:314); uncharged `steps` in the
+pointer loop goes red (:304).
+
+The fix round also adds `ReadError::DuplicateName { offset, pointer }` in
+place of `Malformed::DuplicateName` (lead request S-1), reviewed as new code:
+the pointer is built through the same charged `pointer()` with the repeated
+name as the innermost step, `members_end` set to the closing object's start so
+enclosing objects resolve their current member, and the array index taken
+before the closed object is pushed to `scratch_items`. Five cases in
+tests/read.rs (`/a`, decoded `a`, `/x/1/k`, `/a~1b/~0`, `/0/k`) and the
+deny-each sweep over `[{"k":1,"k":2}]` cover it. No match on
+`Malformed::DuplicateName`, `DuplicateName` or the old Display text exists in
+any Rust source under /home/peter/dev outside quire-canonical. No new
+findings.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | Two escape shapes added to SHAPES; mutation of the escape append now goes red |
+| FND-002 | fixed | error_paths_charge_their_pointer_and_lexeme asserts [64, 96, 4, 5] and runs the deny sweep with requested bytes and live heap 0; mutation goes red |
+| FND-003 | fixed | Every recorded read asserts peak heap above baseline <= total charged |
+| FND-004 | fixed | crate-private `Refusal { Denied, Allocation }` with exhaustive From impls; catch-all removed |
+| FND-005 | fixed | `LimitKind` is `#[non_exhaustive]`; version bump left to release, per repo convention |
+| FND-006 | fixed | Dead `recorded`/`let _ = ample` lines removed |
+| FND-007 | fixed | docs/encoding.md and read.rs module docs state that NumberOutOfRange and DuplicateName refusals keep their charged pointer and lexeme |
