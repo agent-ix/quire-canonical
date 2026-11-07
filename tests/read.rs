@@ -229,3 +229,45 @@ fn duplicate_names_carry_the_repeated_members_pointer() {
         }
     }
 }
+
+/// Every value of a document is reached again from its id, and an id past the
+/// document's last value names nothing.
+#[test]
+fn node_ids_round_trip_and_foreign_ids_miss() {
+    use quire_canonical::{to_vec, Limits, Node, NodeRef};
+
+    let document = read(br#"{"a":[1,"x",{"b":null}],"c":true}"#, u64::MAX).expect("reads");
+    let mut seen = vec![document.root()];
+    let mut ids = Vec::new();
+    while let Some(node) = seen.pop() {
+        match node.node() {
+            Node::Array(items) => seen.extend(items),
+            Node::Object(members) => seen.extend(members.map(|(_, value)| value)),
+            _ => {}
+        }
+        ids.push(node);
+    }
+    assert_eq!(ids.len(), 7);
+    let limits = Limits::new(1 << 10);
+    let mut distinct = std::collections::BTreeSet::new();
+    for node in ids {
+        let again: NodeRef<'_> = document.node(node.id()).expect("own id");
+        assert_eq!(again.id(), node.id());
+        assert_eq!(
+            to_vec(&again, limits).expect("again"),
+            to_vec(&node, limits).expect("node")
+        );
+        assert!(distinct.insert(node.id()), "ids are unique");
+    }
+    assert_eq!(
+        document.node(document.root().id()).map(|n| n.id()),
+        Some(document.root().id())
+    );
+    // An id from a larger document is out of range here.
+    let larger = read(b"[0,0,0,0,0,0,0,0,0,0]", u64::MAX).expect("reads");
+    assert!(document.node(larger.root().id()).is_none());
+    assert!(read(b"null", u64::MAX)
+        .expect("reads")
+        .node(larger.root().id())
+        .is_none());
+}

@@ -229,6 +229,15 @@ pub struct Document {
     root: usize,
 }
 
+/// The position of one value in a [`Document`]'s arena.
+///
+/// An id is stable for the life of the document that produced it (a document
+/// is immutable) and is read back with [`Document::node`]. It is a plain
+/// index: no allocation, and an id means nothing in another document. Ids
+/// order by creation, children before the container that holds them.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NodeId(usize);
+
 /// One value inside a [`Document`].
 #[derive(Clone, Copy)]
 pub struct NodeRef<'d> {
@@ -366,6 +375,18 @@ impl Document {
             .saturating_add(bytes(&self.members))
     }
 
+    /// The value at `id`, or `None` when `id` is past this document's last
+    /// value, as an id from a larger document is. An id from another document
+    /// of at least this size names some value here, not the one it named
+    /// there. Does not allocate.
+    #[must_use]
+    pub fn node(&self, id: NodeId) -> Option<NodeRef<'_>> {
+        (id.0 < self.slots.len()).then_some(NodeRef {
+            document: self,
+            id: id.0,
+        })
+    }
+
     /// The top-level value.
     #[must_use]
     pub fn root(&self) -> NodeRef<'_> {
@@ -389,6 +410,12 @@ impl Document {
 }
 
 impl<'d> NodeRef<'d> {
+    /// This value's position in its document, for [`Document::node`].
+    #[must_use]
+    pub fn id(&self) -> NodeId {
+        NodeId(self.id)
+    }
+
     /// What this value holds.
     #[must_use]
     pub fn node(&self) -> Node<'d> {
