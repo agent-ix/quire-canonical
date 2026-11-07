@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
 //! The writer's reservation hook: it is asked for exactly the heap the writer
-//! allocates, a refusal leaves nothing behind, and exact provision admits
-//! where one byte less refuses.
+//! requests from the allocator, a refusal leaves nothing behind, and exact
+//! provision admits where one byte less refuses, for every shape of value.
 //!
 //! A counting global allocator measures the real heap, so the binary holds one
 //! test and no other test allocates concurrently.
@@ -11,14 +11,17 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use quire_canonical::{
-    encode_with_reservation, to_vec, Error, Limits, ProtocolViolation, Reservation,
+    encode_with_reservation, Encode, Error, FixedShape, Limits, ProtocolViolation, Reservation,
     ReservationDenied, Sink, Writer,
 };
+use serde::Serialize;
 
 struct Counting;
 
+/// Heap live now, and the bytes asked of the allocator by every allocation
+/// and every reallocation (the new size of each).
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
+static REQUESTED: AtomicUsize = AtomicUsize::new(0);
 
 // SAFETY: every method forwards to `System` with the caller's arguments
 // unchanged, so `System`'s guarantees hold; the counters are bookkeeping only.
@@ -27,8 +30,8 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: forwarded unchanged; the caller upholds `alloc`'s contract.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
-            let now = CURRENT.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
-            PEAK.fetch_max(now, Ordering::SeqCst);
+            CURRENT.fetch_add(layout.size(), Ordering::SeqCst);
+            REQUESTED.fetch_add(layout.size(), Ordering::SeqCst);
         }
         pointer
     }
@@ -44,8 +47,8 @@ unsafe impl GlobalAlloc for Counting {
         let moved = unsafe { System.realloc(pointer, layout, new_size) };
         if !moved.is_null() {
             CURRENT.fetch_sub(layout.size(), Ordering::SeqCst);
-            let now = CURRENT.fetch_add(new_size, Ordering::SeqCst) + new_size;
-            PEAK.fetch_max(now, Ordering::SeqCst);
+            CURRENT.fetch_add(new_size, Ordering::SeqCst);
+            REQUESTED.fetch_add(new_size, Ordering::SeqCst);
         }
         moved
     }
@@ -58,16 +61,22 @@ static ALLOCATOR: Counting = Counting;
 struct Budget {
     limit: usize,
     charged: usize,
+    calls: usize,
 }
 
 impl Budget {
     fn new(limit: usize) -> Self {
-        Self { limit, charged: 0 }
+        Self {
+            limit,
+            charged: 0,
+            calls: 0,
+        }
     }
 }
 
 impl Reservation for Budget {
     fn reserve(&mut self, bytes: usize) -> Result<(), ReservationDenied> {
+        self.calls += 1;
         match self.charged.checked_add(bytes) {
             Some(total) if total <= self.limit => {
                 self.charged = total;
@@ -78,115 +87,236 @@ impl Reservation for Budget {
     }
 }
 
-/// A sink that allocates nothing, so measured heap is the writer's alone.
-struct Discard;
+/// A sink that keeps its bytes, or with `keep` unset allocates nothing, so
+/// measured heap is the writer's alone.
+struct Out {
+    bytes: Vec<u8>,
+    keep: bool,
+}
 
-impl Sink for Discard {
-    fn write_bytes(&mut self, _bytes: &[u8]) -> Result<(), Error> {
+impl Out {
+    fn kept() -> Self {
+        Self {
+            bytes: Vec::new(),
+            keep: true,
+        }
+    }
+
+    fn discarded() -> Self {
+        Self {
+            bytes: Vec::new(),
+            keep: false,
+        }
+    }
+}
+
+impl Sink for Out {
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.keep {
+            self.bytes.extend_from_slice(bytes);
+        }
         Ok(())
     }
 }
 
 const LIMITS: Limits = Limits::new(1 << 20);
 
-/// An out-of-order object tree with enough members and nesting to grow every
-/// list the writer holds more than once.
-fn push_tree<S: Sink + ?Sized>(
-    writer: &mut Writer<'_, S>,
-    names: &[String],
-    duplicate: bool,
-) -> Result<(), Error> {
+/// What one metered run did.
+struct Run {
+    outcome: Result<u64, Error>,
+    /// Heap live while the finished or refused writer still exists.
+    live: usize,
+    charged: usize,
+    calls: usize,
+    /// Bytes the allocator was asked for during the run.
+    requested: usize,
+}
+
+fn run(
+    sink: &mut Out,
+    push: &impl Fn(&mut Writer<'_, Out>) -> Result<(), Error>,
+    limit: usize,
+) -> Run {
+    let mut budget = Budget::new(limit);
+    let asked = REQUESTED.load(Ordering::SeqCst);
+    let (outcome, live) = {
+        let mut writer = Writer::with_reservation(sink, LIMITS, &mut budget);
+        let pushed = push(&mut writer);
+        let live = CURRENT.load(Ordering::SeqCst);
+        (pushed.and_then(|()| writer.finish()), live)
+    };
+    let requested = REQUESTED.load(Ordering::SeqCst) - asked;
+    Run {
+        outcome,
+        live,
+        charged: budget.charged,
+        calls: budget.calls,
+        requested,
+    }
+}
+
+/// The reservation contract for one shape: the charge is what the allocator
+/// was asked for, exact provision admits with the unmetered bytes, and every
+/// smaller provision refuses with nothing in the sink and no heap kept.
+/// Returns (total charged, hook calls).
+fn check(shape: &str, push: impl Fn(&mut Writer<'_, Out>) -> Result<(), Error>) -> (usize, usize) {
+    let expected = {
+        let mut out = Out::kept();
+        let mut writer = Writer::new(&mut out, LIMITS);
+        push(&mut writer).expect("shape");
+        writer.finish().expect("complete");
+        out.bytes
+    };
+
+    let measured = run(&mut Out::discarded(), &push, usize::MAX);
+    assert_eq!(
+        measured.outcome.expect("admitted"),
+        expected.len() as u64,
+        "{shape}"
+    );
+    assert_eq!(measured.charged, measured.requested, "{shape}: charge");
+
+    let mut out = Out::kept();
+    let exact = run(&mut out, &push, measured.charged);
+    assert_eq!(
+        exact.outcome.expect("exact admits"),
+        expected.len() as u64,
+        "{shape}"
+    );
+    assert_eq!(out.bytes, expected, "{shape}");
+
+    for limit in 0..measured.charged {
+        let mut out = Out::kept();
+        let before = CURRENT.load(Ordering::SeqCst);
+        let refused = run(&mut out, &push, limit);
+        assert!(
+            matches!(
+                refused.outcome,
+                Err(Error::ReservationDenied { requested }) if requested > 0
+            ),
+            "{shape}, limit {limit}: {:?}",
+            refused.outcome
+        );
+        assert!(
+            out.bytes.is_empty(),
+            "{shape}, limit {limit}: partial output"
+        );
+        assert_eq!(refused.live, before, "{shape}, limit {limit}: kept heap");
+    }
+    (measured.charged, measured.calls)
+}
+
+/// A member written out of order, holding a nested array and object.
+fn member(writer: &mut Writer<'_, Out>, name: &str) -> Result<(), Error> {
+    writer.name(name)?;
+    writer.begin_object()?;
+    writer.name("z")?;
+    writer.begin_array()?;
+    writer.integer(1)?;
+    writer.begin_object()?;
+    writer.name("y")?;
+    writer.null()?;
+    writer.name("x")?;
+    writer.string("text")?;
+    writer.end_object()?;
+    writer.end_array()?;
+    writer.name("a")?;
+    writer.bool(true)?;
+    writer.end_object()
+}
+
+fn object_of(writer: &mut Writer<'_, Out>, names: &[String]) -> Result<(), Error> {
     writer.begin_object()?;
     for name in names.iter().rev() {
-        writer.name(name)?;
-        writer.begin_object()?;
-        writer.name("z")?;
-        writer.begin_array()?;
-        writer.integer(1)?;
-        writer.begin_object()?;
-        writer.name("y")?;
-        writer.null()?;
-        writer.name("x")?;
-        writer.string("text")?;
-        writer.end_object()?;
-        writer.end_array()?;
-        writer.name("a")?;
-        writer.bool(true)?;
-        writer.end_object()?;
+        member(writer, name)?;
     }
-    if duplicate {
-        writer.name(&names[0])?;
-        writer.null()?;
-    }
-    writer.end_object()?;
-    Ok(())
+    writer.end_object()
 }
 
-fn names() -> Vec<String> {
-    (0..40).map(|index| format!("member{index:02}")).collect()
-}
-
-/// Run the tree under `limit`, into `sink`, returning the writer's outcome
-/// and the heap still live while the (refused or finished) writer exists.
-fn run<S: Sink + ?Sized>(
-    sink: &mut S,
+fn array_of_objects(
+    writer: &mut Writer<'_, Out>,
     names: &[String],
-    duplicate: bool,
-    limit: usize,
-) -> (Result<u64, Error>, usize, usize) {
-    let mut budget = Budget::new(limit);
-    let outcome = {
-        let mut writer = Writer::with_reservation(sink, LIMITS, &mut budget);
-        let pushed = push_tree(&mut writer, names, duplicate);
-        let live = CURRENT.load(Ordering::SeqCst);
-        let outcome = pushed.and_then(|()| writer.finish());
-        (outcome, live)
-    };
-    (outcome.0, outcome.1, budget.charged)
+    count: usize,
+) -> Result<(), Error> {
+    writer.begin_array()?;
+    for _ in 0..count {
+        object_of(writer, names)?;
+    }
+    writer.end_array()
+}
+
+#[derive(Serialize, FixedShape)]
+#[allow(dead_code)]
+enum Tagged {
+    Unit,
+    Fields { b: u8, a: &'static str },
+}
+
+fn names(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| format!("member{index:02}"))
+        .collect()
 }
 
 #[test]
 fn reservation_charges_exactly_the_writers_heap_and_a_refusal_leaves_nothing() {
-    let names = names();
-    let expected = {
-        let mut bytes = Vec::new();
-        let mut writer = Writer::new(&mut bytes, LIMITS);
-        push_tree(&mut writer, &names, false).expect("tree");
-        writer.finish().expect("complete");
-        bytes
-    };
+    let names = names(10);
 
-    // What the writer is charged is what it allocates: the charge in total
-    // equals the peak heap the allocator saw.
-    let baseline = CURRENT.load(Ordering::SeqCst);
-    PEAK.store(baseline, Ordering::SeqCst);
-    let (outcome, _, total) = run(&mut Discard, &names, false, usize::MAX);
-    let peak = PEAK.load(Ordering::SeqCst) - baseline;
-    assert_eq!(outcome.expect("admitted"), expected.len() as u64);
-    assert!(total > expected.len(), "buffering costs more than the text");
-    assert_eq!(total, peak);
+    // A top-level object, nested objects and arrays inside it.
+    check("object", |writer| object_of(writer, &names));
 
-    // Exact provision admits and writes the same bytes as an unmetered writer.
-    let mut bytes = Vec::new();
-    let (outcome, _, charged) = run(&mut bytes, &names, false, total);
-    assert_eq!(outcome.expect("exact admits"), expected.len() as u64);
-    assert_eq!(charged, total);
-    assert_eq!(bytes, expected);
-    assert_eq!(bytes, to_vec(&PlainTree(&names), LIMITS).expect("encodes"));
+    // Top-level containers leave nothing in the sink on refusal either.
+    check("array", |writer| {
+        writer.begin_array()?;
+        writer.integer(1)?;
+        writer.begin_array()?;
+        writer.string("x")?;
+        writer.end_array()?;
+        writer.null()?;
+        writer.end_array()
+    });
+    check("scalar", |writer| writer.string("a long enough string"));
 
-    // One byte under refuses, with nothing in the sink and nothing retained.
-    // Every shorter provision does the same, whichever growth it falls at.
-    for limit in 0..total {
-        let mut bytes = Vec::new();
-        let before = CURRENT.load(Ordering::SeqCst);
-        let (outcome, live, _) = run(&mut bytes, &names, false, limit);
-        assert!(
-            matches!(outcome, Err(Error::ReservationDenied { requested }) if requested > 0),
-            "limit {limit}: {outcome:?}"
-        );
-        assert!(bytes.is_empty(), "limit {limit}: partial output");
-        assert_eq!(live, before, "limit {limit}: the refused writer kept heap");
+    // A serde enum variant is a one-member object wrapper at the top level.
+    check("enum wrapper", |writer| {
+        writer.serialize(&Tagged::Fields { b: 1, a: "x" })
+    });
+
+    // Each object of a top-level array reuses the capacity the one before it
+    // grew: three times the objects cost only a few more growths of the
+    // output, not a regrowth of the member lists and walk stack per object.
+    let few = names[..2].to_vec();
+    let (_, calls_5) = check("five objects", |writer| array_of_objects(writer, &few, 5));
+    let (_, calls_15) = check("fifteen objects", |writer| {
+        array_of_objects(writer, &few, 15)
+    });
+    assert!(
+        calls_15 <= calls_5 + 4,
+        "{calls_15} growths for 15 objects, {calls_5} for 5"
+    );
+
+    // The crate's own Encode impls charge their stacks through the writer.
+    let document = quire_canonical::read(br#"{"b":[1,{"d":null,"c":[true]}],"a":"x"}"#, 1 << 10)
+        .expect("reads");
+    check("document", |writer| document.encode_into(writer));
+    check("node", |writer| document.root().encode_into(writer));
+    #[cfg(feature = "serde_json")]
+    {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"b":[1,{"d":null,"c":[true]}],"a":"x"}"#).expect("parses");
+        check("value", |writer| value.encode_into(writer));
     }
+
+    // A caller's Encode impl charges its own scratch the same way.
+    check("caller scratch", |writer| {
+        let mut scratch: Vec<u64> = Vec::new();
+        writer.reserve_list(&mut scratch, 100)?;
+        scratch.resize(100, 7);
+        writer.reserve(16)?;
+        let _scratch: Vec<u8> = Vec::with_capacity(16);
+        writer.begin_array()?;
+        writer.end_array()
+    });
 
     // After a refusal the writer refuses every further event.
     let mut bytes = Vec::new();
@@ -202,36 +332,39 @@ fn reservation_charges_exactly_the_writers_heap_and_a_refusal_leaves_nothing() {
     ));
 
     // The duplicate-name refusal allocates the name it reports, so that
-    // allocation is asked for too.
-    let (outcome, _, total) = run(&mut Discard, &names, true, usize::MAX);
+    // allocation is asked for too, at the capacity actually allocated.
+    let short = ["ab".to_owned()];
+    let duplicate = |writer: &mut Writer<'_, Out>| {
+        writer.begin_object()?;
+        for name in &short {
+            writer.name(name)?;
+            writer.null()?;
+            writer.name(name)?;
+            writer.null()?;
+        }
+        writer.end_object()
+    };
+    let measured = run(&mut Out::discarded(), &duplicate, usize::MAX);
     assert!(
-        matches!(outcome, Err(Error::DuplicateMemberName { ref name }) if *name == names[0]),
-        "{outcome:?}"
+        matches!(measured.outcome, Err(Error::DuplicateMemberName { ref name }) if name == "ab"),
+        "{:?}",
+        measured.outcome
     );
-    let (outcome, _, _) = run(&mut Discard, &names, true, total - 1);
+    assert_eq!(measured.charged, measured.requested);
+    let denied = run(&mut Out::discarded(), &duplicate, measured.charged - 1);
     assert!(
-        matches!(outcome, Err(Error::ReservationDenied { requested }) if requested == names[0].len()),
-        "{outcome:?}"
+        matches!(
+            denied.outcome,
+            Err(Error::ReservationDenied { requested: 4 })
+        ),
+        "{:?}",
+        denied.outcome
     );
 
-    encode_with_reservation_is_denied_through_the_one_shot_entry();
-}
-
-/// The same tree through the public one-shot entry, to show the hook reaches
-/// `encode_with_reservation` callers.
-struct PlainTree<'a>(&'a [String]);
-
-impl quire_canonical::Encode for PlainTree<'_> {
-    fn encode_into<S: Sink + ?Sized>(&self, writer: &mut Writer<'_, S>) -> Result<(), Error> {
-        push_tree(writer, self.0, false)
-    }
-}
-
-fn encode_with_reservation_is_denied_through_the_one_shot_entry() {
-    let names = names();
+    // The one-shot entry reaches the same hook.
     let mut bytes = Vec::new();
     let mut budget = Budget::new(16);
-    let outcome = encode_with_reservation(&mut bytes, &PlainTree(&names), LIMITS, &mut budget);
+    let outcome = encode_with_reservation(&mut bytes, &document, LIMITS, &mut budget);
     assert!(matches!(outcome, Err(Error::ReservationDenied { .. })));
     assert!(bytes.is_empty());
 }

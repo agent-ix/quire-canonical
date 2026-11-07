@@ -43,21 +43,35 @@ against the byte ceiling; see the crate docs for the full memory bound.
 `Reservation`, a caller's say over the heap the writer holds besides the
 output. The writer calls `Reservation::reserve(bytes)` once before each growth
 of one of its internal lists (its container stack, the sort buffer, member and
-closed-object records, the output walk's task stack) and before the name
-allocation of a duplicate-member refusal, with the bytes by which that list's
-capacity is about to grow. It then grows to exactly that capacity, so the
-bytes asked are the bytes allocated, and their sum is the writer's peak
-working heap: capacity is reused across objects and never returned until the
-writer is finished, dropped or refused, so no byte is asked twice and none is
-released. The `Sink` is the caller's own destination and is never asked about.
+closed-object records, the output walk's task stack, the held output) and
+before the name allocation of a duplicate-member refusal, with the full
+capacity in bytes that growth asks the allocator for. It then grows to exactly
+that capacity, so the bytes asked are the bytes requested from the allocator,
+and their sum bounds the writer's peak heap (a growth that copies holds the
+old and the new block at once, and the full charge covers that). Capacity is
+reused across objects, so an array of objects regrows nothing per element, and
+is dropped when the writer is finished, dropped or refused. The `Sink` is the
+caller's own destination and is never asked about.
+
+An `Encode` implementation that keeps working lists of its own charges them
+with `Writer::reserve_list` (grow a `Vec` through the reservation) or
+`Writer::reserve` (charge bytes about to be allocated). The crate's own
+`Encode` impls for `serde_json::Value`, `Document` and `NodeRef` do.
 
 A `ReservationDenied` from the hook refuses the event with
 `Error::ReservationDenied { requested }`. Nothing is allocated for the refused
-growth and the writer drops everything it holds. A top-level object reaches the
-sink only after every growth its output needs was admitted, so a refusal
-leaves none of it in the sink; elements of a top-level array before the
-refusal have already streamed. Exact provision admits and one byte less
-refuses. Without a reservation the writer behaves as before.
+growth and the writer drops everything it holds. A metered writer holds the
+whole output and writes it to the sink in `finish`, so a refusal leaves the
+sink untouched for every shape of value, top-level arrays and enum wrappers
+included. That costs the output's length in heap (charged) and nothing else:
+no second walk, and the output is written once.
+
+Without a reservation the writer still streams: scalars and arrays reach the
+sink as they are produced and a top-level object is written when it closes.
+Two things differ from the writer before the reservation hook existed, for
+every writer: lists grow by doubling from a minimum of 4 with `try_reserve_exact`
+instead of `Vec`'s own policy, and a writer that refuses an event drops its
+buffers at once instead of at drop.
 
 ## Numbers
 

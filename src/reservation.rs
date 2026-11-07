@@ -16,19 +16,24 @@ const MIN_CAPACITY: usize = 4;
 /// A caller's decision on heap growth, asked before each growth.
 ///
 /// Every growth of a writer-owned list calls [`Reservation::reserve`] once
-/// with the bytes by which that list's capacity is about to grow (element
-/// size times added capacity). The writer grows to exactly the capacity it
-/// computed, by doubling, so the bytes asked are the bytes the allocation
-/// holds. Calls are made in the order the growths happen.
+/// with the full capacity, in bytes (element size times new capacity), that
+/// the growth asks the allocator for. The writer grows to exactly the
+/// capacity it computed, by doubling, so the bytes asked are the bytes
+/// requested from the allocator. Calls are made in the order the growths
+/// happen.
 ///
 /// # Accounting unit and retention
 ///
-/// The unit is bytes of list capacity. Capacity is kept until the writer is
-/// finished, dropped, or has refused an event, and is reused across objects,
-/// so the writer never asks for the same bytes twice and never returns any:
-/// the sum of the bytes asked is the writer's peak working heap. The
-/// destination of the output (the [`crate::Sink`]) is not the writer's heap
-/// and is never asked about.
+/// The unit is bytes of list capacity, charged in full at each growth. A
+/// growth that cannot extend in place holds the old and the new block at once
+/// while it copies, and the full-capacity charge covers that moment; nothing
+/// is credited back when the old block goes. So the sum of the bytes asked is
+/// an upper bound on the writer's peak heap, equal to everything it requested
+/// from the allocator. Capacity is kept until the writer is finished,
+/// dropped, or has refused an event, and is reused across objects, so a
+/// list is regrown only when it outgrows its capacity. The destination of
+/// the output (the [`crate::Sink`]) is not the writer's heap and is never
+/// asked about.
 pub trait Reservation {
     /// Admit or refuse `bytes` of heap growth.
     ///
@@ -70,7 +75,7 @@ impl<'r> Provision<'r> {
             return Ok(());
         }
         let target = needed.max(capacity.saturating_mul(2)).max(MIN_CAPACITY);
-        let bytes = core::mem::size_of::<T>().saturating_mul(target - capacity);
+        let bytes = core::mem::size_of::<T>().saturating_mul(target);
         if let Some(reservation) = self.0.as_deref_mut() {
             if reservation.reserve(bytes).is_err() {
                 return Err(Error::ReservationDenied { requested: bytes });

@@ -89,11 +89,7 @@ impl Encode for Value {
                 }
             };
             if let Some(open) = open {
-                if stack.try_reserve(1).is_err() {
-                    return writer.refuse(Error::Allocation {
-                        requested: core::mem::size_of::<Open<'_>>(),
-                    });
-                }
+                writer.reserve_list(&mut stack, 1)?;
                 stack.push(open);
             }
             // Move to the next value: the innermost open container's next
