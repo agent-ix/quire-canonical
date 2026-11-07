@@ -271,3 +271,12 @@ fn node_ids_round_trip_and_foreign_ids_miss() {
         .node(larger.root().id())
         .is_none());
 }
+
+/// FR-259: `NodeId` is nameable from the crate root, so callers can hold
+/// the identity `NodeRef::id` yields and resolve it with `Document::node`.
+#[test]
+fn node_id_is_nameable_from_the_crate_root() {
+    let document = read(b"[1]", u64::MAX).expect("reads");
+    let id: quire_canonical::NodeId = document.root().id();
+    assert_eq!(document.node(id).expect("resolves").id(), id);
+}
