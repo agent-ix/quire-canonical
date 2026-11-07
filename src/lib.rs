@@ -118,7 +118,8 @@ pub use crate::identity::{
     IdentityError, ObjectIdentity, Revision, SemanticComparisonRefusal, SubjectKind,
 };
 pub use crate::read::{
-    read, Document, Items, Malformed, Members, Node, NodeRef, Number, ReadError,
+    read, read_bounded, read_with_reservation, Document, Items, Malformed, Members, Node, NodeRef,
+    Number, ReadError,
 };
 pub use crate::reservation::{Reservation, ReservationDenied};
 pub use crate::shape::{deepest, nest, FixedShape};
