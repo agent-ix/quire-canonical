@@ -67,3 +67,13 @@ crate's own `Encode` impls. AC3 is met.
 | FND-001 | medium | AC1 asks for the hook before each internal allocation. The crate's own `Encode` impls for `serde_json::Value` (stack, `try_reserve`) and `Document`/`NodeRef` (task stack) grow their own lists without the reservation. `encode_with_reservation(&value, …)` on those types under-charges, silently and without limit | src/value.rs:62-97, src/read.rs:388-440, src/lib.rs:218-237 |
 | FND-002 | medium | `Writer` has no public method that lets an `Encode` impl charge its own working heap through the caller's reservation. The `CheckedNodeId` `pending` stack, which ModelStepOrder reaches, cannot be precharged through the writer. IR-1383 must charge it out of band or leave it uncharged | src/writer.rs:268-274, src/reservation.rs:188-197 |
 | FND-003 | medium | The value tests cover a single top-level object only. No reservation test covers a top-level array, an array of objects, a top-level serde enum, or a short duplicate name, which are exactly the shapes behind SR-2474 FND-001/002/003/004 | tests/reservation.rs:154-237 |
+
+## Dispositions
+
+Round 1, fix commit 418e06d2a4f749d309d18c9a2ba9a705bc3461ea.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | `Value` (value.rs:92) and `NodeRef`/`Document` (read.rs:389-417) grow their stacks through `writer.reserve_list`. The test's "document", "node" and "value" cases assert charged == requested and an empty sink on every smaller limit |
+| FND-002 | fixed | Public `Writer::reserve_list(&mut Vec<T>, additional)` and `Writer::reserve(bytes)` charge through the reservation and refuse the writer on denial (guarded). The "caller scratch" test covers both. The downstream `CheckedNodeId` `pending` stack must still adopt `reserve_list`, but that work belongs to IR-1383 / quire-contract-model, not this PR |
+| FND-003 | fixed | tests/reservation.rs now checks object, array, scalar, enum wrapper, 5 and 15 objects, document, node, value, caller scratch and a short duplicate name. Each case checks charged == requested, that exact provision admits identical bytes, and that every smaller limit refuses with an empty sink and unchanged live heap |

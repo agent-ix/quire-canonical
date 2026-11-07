@@ -67,7 +67,8 @@ included. That costs the output's length in heap (charged) and nothing else:
 no second walk, and the output is written once.
 
 Without a reservation the writer still streams: scalars and arrays reach the
-sink as they are produced and a top-level object is written when it closes.
+sink as they are produced; a top-level object's opening brace reaches it at
+once and its members when the object closes.
 Two things differ from the writer before the reservation hook existed, for
 every writer: lists grow by doubling from a minimum of 4 with `try_reserve_exact`
 instead of `Vec`'s own policy, and a writer that refuses an event drops its
