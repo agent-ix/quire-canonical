@@ -92,6 +92,7 @@ To parse untrusted JSON, call `read(bytes, max_input_bytes)`, which returns a
 | `to_vec`, `sha256`, `sha256_with_domain`, `encode` | Encode any `Encode` value to bytes, to a digest, to a domain-labeled digest, or into a `Sink`. |
 | `Writer` | Push-event encoder; refuses events out of order. |
 | `read`, `Document`, `NodeRef` | The shared reader of untrusted JSON, into an arena tree. Refuses malformed input with the byte offset, and numbers with no finite double with their JSON pointer. |
+| `NodeId` | The opaque per-document node handle returned by `NodeRef::id` and taken by `Document::node`. |
 | `FixedShape` and `#[derive(FixedShape)]` | Marks serde types whose depth is fixed by their schema; a recursive type fails to compile. |
 | `Limits` | The canonical byte ceiling. There is no depth limit. |
 | `AuthorityQualifiedSubjectReference` and its parts | A five-member identity key (authority, revision, digest, kind, object) with componentwise comparison. |
