@@ -10,24 +10,48 @@
 //! `Debug`, `PartialEq` and `Drop` therefore walk flat vectors and never
 //! recurse either.
 //!
-//! # Bounds
+//! # Bounds and working-byte accounting
 //!
-//! The one limit is the caller's input byte limit, checked before any work.
-//! Every heap structure the reader grows is linear in the input bytes: each
-//! node, each open container on the stack and each child id is introduced by
-//! at least one input byte, and decoded text is never longer than its
-//! escaped source. So the input byte limit bounds memory as well as time.
-//! There is no depth limit. Growth uses `try_reserve`, so exhausting memory
-//! is a refusal, not an abort.
+//! There is no depth limit and no fixed size cap. Two independent provisions
+//! bound a read, both the caller's:
 //!
-//! The constant is not small: a node costs a 32-byte slot and an 8- or
-//! 24-byte child entry, an open container a 16-byte stack entry, and an open
-//! object's member a 32-byte pending record, before `Vec` growth slack. For
-//! inputs made of one- and two-byte values (`[[[...]]]`, `[1,1,...]`,
-//! `{"k":{"k":...}}`) `tests/memory.rs` measures the peak heap at under 64x
-//! the input length (between 19x and 47x). Size the input byte limit with
-//! that multiple in mind: a 16 MiB input may take up to 1 GiB while it is
-//! read.
+//! * the input byte limit, checked first and before any parsing, so an input
+//!   over it is refused as [`LimitKind::InputBytes`] whatever it contains;
+//! * the working-byte provision of [`read_with_reservation`] (a caller's
+//!   [`Reservation`], so one meter can also sit behind the canonical writer)
+//!   or [`read_bounded`] (a cumulative byte count).
+//!
+//! The reader calls [`Reservation::reserve`] once before each growth of one
+//! of its lists: the nodes, the child ids and object members, the decoded
+//! text, the open-container stack, the children of open containers, the
+//! duplicate-name sort buffer, and the pointer and lexeme a
+//! [`ReadError::NumberOutOfRange`] or [`ReadError::DuplicateName`] carries.
+//! The unit is the same as the
+//! writer's: bytes of the full new capacity, element size times new
+//! capacity, charged at every growth and never credited back. The reader
+//! grows each list to exactly the capacity it computed (doubling, at least
+//! four elements), so the bytes asked are the bytes requested from the
+//! allocator and no length-based estimate is involved.
+//!
+//! Retention: the sum of the bytes asked bounds the read's peak heap, since a
+//! growth that copies holds the old and the new block at once. When the read
+//! returns, the open-container stack, the scratch lists and the sort buffer
+//! are dropped, and the [`Document`] keeps the rest,
+//! [`Document::retained_bytes`]. A refusal that carries a pointer or lexeme
+//! ([`ReadError::NumberOutOfRange`], [`ReadError::DuplicateName`]) keeps those
+//! charged strings for as long as the error lives; they are not part of the
+//! document. A meter that does not refund therefore
+//! already holds the document's charge and more; a caller whose meter
+//! refunds can release down to `retained_bytes` when the read returns, and
+//! the rest when it drops the document. Decoding or copying the document
+//! afterwards is the caller's own growth and is charged by the caller to the
+//! same meter.
+//!
+//! A refusal ([`ReadError::ReservationDenied`], or [`ReadError::Limit`] with
+//! [`LimitKind::WorkingBytes`] from `read_bounded`) comes before the denied
+//! growth, drops everything the reader holds and returns no document.
+//! Growth uses `try_reserve_exact`, so exhausting memory is a different
+//! refusal, [`ReadError::Allocation`], not an abort.
 //!
 //! # What it accepts
 //!
@@ -48,7 +72,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::{Encode, Error, LimitExceeded, LimitKind, Sink, Writer};
+use crate::reservation::{Provision, Refusal};
+use crate::{
+    Encode, Error, LimitExceeded, LimitKind, Reservation, ReservationDenied, Sink, Writer,
+};
 
 /// Why [`read`] refused its input.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, thiserror::Error)]
@@ -83,12 +110,40 @@ pub enum ReadError {
         /// The number's exact source text, such as `-1e400`.
         lexeme: String,
     },
+    /// Two members of one object have the same name (RFC 8785 requires
+    /// I-JSON). Identified like [`ReadError::NumberOutOfRange`]: by where the
+    /// repeat sits.
+    #[error("duplicate member name at {pointer:?} (byte {offset})")]
+    DuplicateName {
+        /// The byte offset of the later member's name.
+        offset: usize,
+        /// The later member's location as an RFC 6901 JSON pointer.
+        pointer: String,
+    },
     /// A heap reservation for the tree failed.
     #[error("allocation of {requested} bytes for the JSON tree failed")]
     Allocation {
         /// The size of the reservation that failed.
         requested: usize,
     },
+    /// The caller's [`Reservation`] refused a heap growth the reader needed
+    /// ([`read_with_reservation`]). Nothing was allocated for it and no
+    /// document is returned. Distinct from [`ReadError::Allocation`], which
+    /// is the allocator running out.
+    #[error("heap reservation of {requested} bytes for the JSON tree was denied")]
+    ReservationDenied {
+        /// The bytes of growth the reservation was asked for.
+        requested: usize,
+    },
+}
+
+impl From<Refusal> for ReadError {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Denied { requested } => Self::ReservationDenied { requested },
+            Refusal::Allocation { requested } => Self::Allocation { requested },
+        }
+    }
 }
 
 /// What is wrong with malformed JSON input.
@@ -109,8 +164,6 @@ pub enum Malformed {
     LoneSurrogate,
     /// A number that does not follow the RFC 8259 number grammar.
     InvalidNumber,
-    /// A member name already used earlier in the same object.
-    DuplicateName,
     /// Content after the one top-level value.
     TrailingContent,
 }
@@ -125,7 +178,6 @@ impl fmt::Display for Malformed {
             Self::InvalidEscape => "invalid escape",
             Self::LoneSurrogate => "lone surrogate escape",
             Self::InvalidNumber => "invalid number",
-            Self::DuplicateName => "duplicate member name",
             Self::TrailingContent => "content after the JSON value",
         })
     }
@@ -176,6 +228,15 @@ pub struct Document {
     members: Vec<(Range, usize)>,
     root: usize,
 }
+
+/// The position of one value in a [`Document`]'s arena.
+///
+/// An id is stable for the life of the document that produced it (a document
+/// is immutable) and is read back with [`Document::node`]. It is a plain
+/// index: no allocation, and an id means nothing in another document. Ids
+/// order by creation, children before the container that holds them.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct NodeId(usize);
 
 /// One value inside a [`Document`].
 #[derive(Clone, Copy)]
@@ -300,6 +361,32 @@ impl<'d> Iterator for Members<'d> {
 impl ExactSizeIterator for Members<'_> {}
 
 impl Document {
+    /// The heap bytes this document holds: the capacity of its node, child,
+    /// member and text lists, the unit the reader's reservation is asked in.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        fn bytes<T>(list: &Vec<T>) -> usize {
+            list.capacity().saturating_mul(core::mem::size_of::<T>())
+        }
+        self.text
+            .capacity()
+            .saturating_add(bytes(&self.slots))
+            .saturating_add(bytes(&self.items))
+            .saturating_add(bytes(&self.members))
+    }
+
+    /// The value at `id`, or `None` when `id` is past this document's last
+    /// value, as an id from a larger document is. An id from another document
+    /// of at least this size names some value here, not the one it named
+    /// there. Does not allocate.
+    #[must_use]
+    pub fn node(&self, id: NodeId) -> Option<NodeRef<'_>> {
+        (id.0 < self.slots.len()).then_some(NodeRef {
+            document: self,
+            id: id.0,
+        })
+    }
+
     /// The top-level value.
     #[must_use]
     pub fn root(&self) -> NodeRef<'_> {
@@ -323,6 +410,12 @@ impl Document {
 }
 
 impl<'d> NodeRef<'d> {
+    /// This value's position in its document, for [`Document::node`].
+    #[must_use]
+    pub fn id(&self) -> NodeId {
+        NodeId(self.id)
+    }
+
     /// What this value holds.
     #[must_use]
     pub fn node(&self) -> Node<'d> {
@@ -442,6 +535,83 @@ impl Encode for NodeRef<'_> {
 /// text when a number has no finite double; [`ReadError::Allocation`] when
 /// memory runs out.
 pub fn read(input: &[u8], max_input_bytes: u64) -> Result<Document, ReadError> {
+    read_provisioned(input, max_input_bytes, Provision::default())
+}
+
+/// As [`read`], with the reader asking `reservation` before every growth of
+/// its own heap (see the module docs for the accounting unit).
+///
+/// # Errors
+///
+/// As [`read`], and [`ReadError::ReservationDenied`] when `reservation`
+/// refuses a growth. The encoded-input limit is checked first, so an input
+/// over `max_input_bytes` is refused as [`ReadError::Limit`] without
+/// `reservation` being asked anything.
+pub fn read_with_reservation(
+    input: &[u8],
+    max_input_bytes: u64,
+    reservation: &mut dyn Reservation,
+) -> Result<Document, ReadError> {
+    read_provisioned(input, max_input_bytes, Provision::new(reservation))
+}
+
+/// As [`read`], with a working-byte provision of `max_working_bytes`: the
+/// total bytes of heap the reader may grow, charged cumulatively (see the
+/// module docs).
+///
+/// # Errors
+///
+/// As [`read`], and [`ReadError::Limit`] with [`LimitKind::WorkingBytes`]
+/// when a growth would take the total past `max_working_bytes`; its
+/// `required` is the total including that growth. No document is returned.
+pub fn read_bounded(
+    input: &[u8],
+    max_input_bytes: u64,
+    max_working_bytes: u64,
+) -> Result<Document, ReadError> {
+    let mut budget = WorkingBudget {
+        bound: max_working_bytes,
+        charged: 0,
+        refused: None,
+    };
+    match read_with_reservation(input, max_input_bytes, &mut budget) {
+        Err(ReadError::ReservationDenied { .. }) => Err(LimitExceeded {
+            kind: LimitKind::WorkingBytes,
+            bound: max_working_bytes,
+            required: budget.refused.unwrap_or(u64::MAX),
+        }
+        .into()),
+        other => other,
+    }
+}
+
+/// A cumulative byte budget for [`read_bounded`].
+struct WorkingBudget {
+    bound: u64,
+    charged: u64,
+    /// The total the refused growth would have reached.
+    refused: Option<u64>,
+}
+
+impl Reservation for WorkingBudget {
+    fn reserve(&mut self, bytes: usize) -> Result<(), ReservationDenied> {
+        let total = self
+            .charged
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        if total > self.bound {
+            self.refused = Some(total);
+            return Err(ReservationDenied);
+        }
+        self.charged = total;
+        Ok(())
+    }
+}
+
+fn read_provisioned(
+    input: &[u8],
+    max_input_bytes: u64,
+    provision: Provision<'_>,
+) -> Result<Document, ReadError> {
     let length = u64::try_from(input.len()).unwrap_or(u64::MAX);
     if length > max_input_bytes {
         return Err(LimitExceeded {
@@ -455,7 +625,7 @@ pub fn read(input: &[u8], max_input_bytes: u64) -> Result<Document, ReadError> {
         offset: error.valid_up_to(),
         kind: Malformed::InvalidUtf8,
     })?;
-    Parser::new(source)?.run()
+    Parser::new(source, provision).run()
 }
 
 /// What the parser expects next.
@@ -491,7 +661,8 @@ struct PendingMember {
     id: usize,
 }
 
-struct Parser<'i> {
+struct Parser<'i, 'r> {
+    provision: Provision<'r>,
     source: &'i str,
     input: &'i [u8],
     position: usize,
@@ -508,45 +679,14 @@ struct Parser<'i> {
     order: Vec<usize>,
 }
 
-fn reserve<T>(vector: &mut Vec<T>, additional: usize) -> Result<(), ReadError> {
-    vector
-        .try_reserve(additional)
-        .map_err(|_| ReadError::Allocation {
-            requested: core::mem::size_of::<T>().saturating_mul(additional),
-        })
-}
-
-/// An owned copy of `text`, reserved fallibly.
-fn owned(text: &str) -> Result<String, ReadError> {
-    let mut copy = String::new();
-    copy.try_reserve(text.len())
-        .map_err(|_| ReadError::Allocation {
-            requested: text.len(),
-        })?;
-    copy.push_str(text);
-    Ok(copy)
-}
-
-fn push<T>(vector: &mut Vec<T>, value: T) -> Result<(), ReadError> {
-    reserve(vector, 1)?;
-    vector.push(value);
-    Ok(())
-}
-
-impl<'i> Parser<'i> {
-    fn new(source: &'i str) -> Result<Self, ReadError> {
-        let mut text = String::new();
-        // Decoded text never outgrows its source, so this one reservation
-        // holds every string and number literal.
-        text.try_reserve(source.len())
-            .map_err(|_| ReadError::Allocation {
-                requested: source.len(),
-            })?;
-        Ok(Self {
+impl<'i, 'r> Parser<'i, 'r> {
+    fn new(source: &'i str, provision: Provision<'r>) -> Self {
+        Self {
+            provision,
             source,
             input: source.as_bytes(),
             position: 0,
-            text,
+            text: String::new(),
             slots: Vec::new(),
             items: Vec::new(),
             members: Vec::new(),
@@ -554,7 +694,16 @@ impl<'i> Parser<'i> {
             scratch_items: Vec::new(),
             scratch_members: Vec::new(),
             order: Vec::new(),
-        })
+        }
+    }
+
+    /// Append `piece` to the decoded text, asking the reservation first.
+    fn append(&mut self, piece: &str) -> Result<(), ReadError> {
+        self.provision
+            .grow_text(&mut self.text, piece.len())
+            .map_err(ReadError::from)?;
+        self.text.push_str(piece);
+        Ok(())
     }
 
     fn malformed(&self, offset: usize, kind: Malformed) -> ReadError {
@@ -562,10 +711,10 @@ impl<'i> Parser<'i> {
     }
 
     /// The refusal for the number `literal` at `offset`, with its JSON pointer.
-    fn number_out_of_range(&self, offset: usize, literal: &str) -> ReadError {
+    fn number_out_of_range(&mut self, offset: usize, literal: &str) -> ReadError {
         match self
-            .pointer()
-            .and_then(|pointer| Ok((pointer, owned(literal)?)))
+            .pointer(None)
+            .and_then(|pointer| Ok((pointer, self.owned(literal)?)))
         {
             Ok((pointer, lexeme)) => ReadError::NumberOutOfRange {
                 offset,
@@ -576,8 +725,21 @@ impl<'i> Parser<'i> {
         }
     }
 
-    /// The RFC 6901 pointer of the value being read, from the open containers.
-    fn pointer(&self) -> Result<String, ReadError> {
+    /// An owned copy of `text`, charged to the reservation and reserved
+    /// fallibly.
+    fn owned(&mut self, text: &str) -> Result<String, ReadError> {
+        let mut copy = String::new();
+        self.provision
+            .grow_text(&mut copy, text.len())
+            .map_err(ReadError::from)?;
+        copy.push_str(text);
+        Ok(copy)
+    }
+
+    /// The RFC 6901 pointer of the value being read, from the open containers,
+    /// below the member `name` of the object whose members start at
+    /// `children_start` on `scratch_members` when given.
+    fn pointer(&mut self, below: Option<(Range, usize)>) -> Result<String, ReadError> {
         enum Step {
             Index(usize),
             Name(Range),
@@ -589,20 +751,32 @@ impl<'i> Parser<'i> {
         let mut steps = Vec::new();
         let mut items_end = self.scratch_items.len();
         let mut members_end = self.scratch_members.len();
+        if let Some((name, children_start)) = below {
+            self.provision
+                .grow(&mut steps, 1)
+                .map_err(ReadError::from)?;
+            steps.push(Step::Name(name));
+            // The object being closed still has its members on the shared
+            // list; the ones below it belong to the objects around it.
+            members_end = children_start;
+        }
         for open in self.stack.iter().rev() {
             if open.object {
                 let member = members_end
                     .checked_sub(1)
                     .and_then(|index| self.scratch_members.get(index));
                 if let Some(member) = member {
-                    push(&mut steps, Step::Name(member.name))?;
+                    self.provision
+                        .grow(&mut steps, 1)
+                        .map_err(ReadError::from)?;
+                    steps.push(Step::Name(member.name));
                 }
                 members_end = open.start;
             } else {
-                push(
-                    &mut steps,
-                    Step::Index(items_end.saturating_sub(open.start)),
-                )?;
+                self.provision
+                    .grow(&mut steps, 1)
+                    .map_err(ReadError::from)?;
+                steps.push(Step::Index(items_end.saturating_sub(open.start)));
                 items_end = open.start;
             }
         }
@@ -626,9 +800,9 @@ impl<'i> Parser<'i> {
             length = length.saturating_add(1).saturating_add(part);
         }
         let mut pointer = String::new();
-        pointer
-            .try_reserve_exact(length)
-            .map_err(|_| ReadError::Allocation { requested: length })?;
+        self.provision
+            .grow_text(&mut pointer, length)
+            .map_err(ReadError::from)?;
         for step in steps.iter().rev() {
             pointer.push('/');
             match step {
@@ -751,17 +925,17 @@ impl<'i> Parser<'i> {
             b'{' | b'[' => {
                 self.position += 1;
                 let object = byte == b'{';
-                push(
-                    &mut self.stack,
-                    OpenContainer {
-                        object,
-                        start: if object {
-                            self.scratch_members.len()
-                        } else {
-                            self.scratch_items.len()
-                        },
+                self.provision
+                    .grow(&mut self.stack, 1)
+                    .map_err(ReadError::from)?;
+                self.stack.push(OpenContainer {
+                    object,
+                    start: if object {
+                        self.scratch_members.len()
+                    } else {
+                        self.scratch_items.len()
                     },
-                )?;
+                });
                 return Ok(if object {
                     Expect::NameOrEnd
                 } else {
@@ -790,7 +964,10 @@ impl<'i> Parser<'i> {
 
     fn node(&mut self, slot: Slot) -> Result<usize, ReadError> {
         let id = self.slots.len();
-        push(&mut self.slots, slot)?;
+        self.provision
+            .grow(&mut self.slots, 1)
+            .map_err(ReadError::from)?;
+        self.slots.push(slot);
         Ok(id)
     }
 
@@ -807,7 +984,12 @@ impl<'i> Parser<'i> {
                     })?;
                 member.id = id;
             }
-            Some(OpenContainer { object: false, .. }) => push(&mut self.scratch_items, id)?,
+            Some(OpenContainer { object: false, .. }) => {
+                self.provision
+                    .grow(&mut self.scratch_items, 1)
+                    .map_err(ReadError::from)?;
+                self.scratch_items.push(id);
+            }
             None => {}
         }
         Ok(Expect::Separator)
@@ -825,14 +1007,15 @@ impl<'i> Parser<'i> {
             return Err(self.unexpected());
         }
         self.position += 1;
-        push(
-            &mut self.scratch_members,
-            PendingMember {
-                name,
-                offset,
-                id: 0,
-            },
-        )
+        self.provision
+            .grow(&mut self.scratch_members, 1)
+            .map_err(ReadError::from)?;
+        self.scratch_members.push(PendingMember {
+            name,
+            offset,
+            id: 0,
+        });
+        Ok(())
     }
 
     /// Close the innermost container, whose closing byte has been consumed.
@@ -848,7 +1031,9 @@ impl<'i> Parser<'i> {
             self.check_unique_names(open.start)?;
             let pending = self.scratch_members.get(open.start..).unwrap_or_default();
             let start = self.members.len();
-            reserve(&mut self.members, pending.len())?;
+            self.provision
+                .grow(&mut self.members, pending.len())
+                .map_err(ReadError::from)?;
             self.members
                 .extend(pending.iter().map(|member| (member.name, member.id)));
             self.scratch_members.truncate(open.start);
@@ -859,7 +1044,9 @@ impl<'i> Parser<'i> {
         } else {
             let items = self.scratch_items.get(open.start..).unwrap_or_default();
             let start = self.items.len();
-            reserve(&mut self.items, items.len())?;
+            self.provision
+                .grow(&mut self.items, items.len())
+                .map_err(ReadError::from)?;
             self.items.extend_from_slice(items);
             self.scratch_items.truncate(open.start);
             Slot::Array(Range {
@@ -888,23 +1075,28 @@ impl<'i> Parser<'i> {
                 .unwrap_or_default()
         };
         self.order.clear();
-        reserve(&mut self.order, children.len())?;
+        self.provision
+            .grow(&mut self.order, children.len())
+            .map_err(ReadError::from)?;
         self.order.extend(0..children.len());
         self.order
             .sort_unstable_by(|left, right| name_of(*left).cmp(&name_of(*right)));
+        let mut repeat = None;
         for pair in self.order.windows(2) {
             let [left, right] = pair else { continue };
             let (left_name, _) = name_of(*left);
             let (right_name, later) = name_of(*right);
             if left_name == right_name {
                 // Sorted by (name, offset), so `right` is the later one.
-                return Err(ReadError::Malformed {
-                    offset: later,
-                    kind: Malformed::DuplicateName,
-                });
+                repeat = children.get(*right).map(|member| (member.name, later));
+                break;
             }
         }
-        Ok(())
+        let Some((name, offset)) = repeat else {
+            return Ok(());
+        };
+        let pointer = self.pointer(Some((name, start)))?;
+        Err(ReadError::DuplicateName { offset, pointer })
     }
 
     /// Read the string starting at the current `"`, decoding it into `text`.
@@ -925,7 +1117,7 @@ impl<'i> Parser<'i> {
                 .source
                 .get(run_start..self.position)
                 .unwrap_or_default();
-            self.text.push_str(run);
+            self.append(run)?;
             match self.peek() {
                 Some(b'"') => {
                     self.position += 1;
@@ -961,8 +1153,7 @@ impl<'i> Parser<'i> {
             b'u' => self.unicode_escape(offset)?,
             _ => return Err(self.malformed(offset, Malformed::InvalidEscape)),
         };
-        self.text.push(decoded);
-        Ok(())
+        self.append(decoded.encode_utf8(&mut [0; 4]))
     }
 
     /// Decode `\uXXXX`, and its low half when it is a high surrogate. The
@@ -1041,7 +1232,7 @@ impl<'i> Parser<'i> {
             return Err(self.number_out_of_range(start, literal));
         }
         let text_start = self.text.len();
-        self.text.push_str(literal);
+        self.append(literal)?;
         Ok(Slot::Number {
             text: Range {
                 start: text_start,

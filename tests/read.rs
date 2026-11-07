@@ -120,8 +120,6 @@ fn malformed_input_is_refused_with_its_offset() {
         ("\"abc", (4, Malformed::UnexpectedEnd)),
         ("null null", (5, Malformed::TrailingContent)),
         ("\u{feff}null", (0, Malformed::UnexpectedCharacter)),
-        (r#"{"a":1,"b":2,"a":3}"#, (13, Malformed::DuplicateName)),
-        (r#"{"\u0061":1,"a":2}"#, (12, Malformed::DuplicateName)),
     ] {
         assert_eq!(refusal(text), expected, "{text:?}");
     }
@@ -209,4 +207,67 @@ fn a_subtree_encodes_on_its_own() {
         to_vec(&wire, LIMITS).expect("encodes"),
         br#"{"x":{},"y":[2,1]}"#
     );
+}
+
+/// A repeated member name is refused at the later member, with that member's
+/// RFC 6901 pointer.
+#[test]
+fn duplicate_names_carry_the_repeated_members_pointer() {
+    for (text, offset, pointer) in [
+        (r#"{"a":1,"b":2,"a":3}"#, 13, "/a"),
+        (r#"{"\u0061":1,"a":2}"#, 12, "/a"),
+        (r#"{"x":[0,{"k":1,"k":2}]}"#, 15, "/x/1/k"),
+        (r#"{"a/b":{"~":1,"~":2}}"#, 14, "/a~1b/~0"),
+        (r#"[{"k":1,"k":2}]"#, 8, "/0/k"),
+    ] {
+        match read(text.as_bytes(), u64::MAX) {
+            Err(ReadError::DuplicateName {
+                offset: found,
+                pointer: at,
+            }) => assert_eq!((found, at.as_str()), (offset, pointer), "{text}"),
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+}
+
+/// Every value of a document is reached again from its id, and an id past the
+/// document's last value names nothing.
+#[test]
+fn node_ids_round_trip_and_foreign_ids_miss() {
+    use quire_canonical::{to_vec, Limits, Node, NodeRef};
+
+    let document = read(br#"{"a":[1,"x",{"b":null}],"c":true}"#, u64::MAX).expect("reads");
+    let mut seen = vec![document.root()];
+    let mut ids = Vec::new();
+    while let Some(node) = seen.pop() {
+        match node.node() {
+            Node::Array(items) => seen.extend(items),
+            Node::Object(members) => seen.extend(members.map(|(_, value)| value)),
+            _ => {}
+        }
+        ids.push(node);
+    }
+    assert_eq!(ids.len(), 7);
+    let limits = Limits::new(1 << 10);
+    let mut distinct = std::collections::BTreeSet::new();
+    for node in ids {
+        let again: NodeRef<'_> = document.node(node.id()).expect("own id");
+        assert_eq!(again.id(), node.id());
+        assert_eq!(
+            to_vec(&again, limits).expect("again"),
+            to_vec(&node, limits).expect("node")
+        );
+        assert!(distinct.insert(node.id()), "ids are unique");
+    }
+    assert_eq!(
+        document.node(document.root().id()).map(|n| n.id()),
+        Some(document.root().id())
+    );
+    // An id from a larger document is out of range here.
+    let larger = read(b"[0,0,0,0,0,0,0,0,0,0]", u64::MAX).expect("reads");
+    assert!(document.node(larger.root().id()).is_none());
+    assert!(read(b"null", u64::MAX)
+        .expect("reads")
+        .node(larger.root().id())
+        .is_none());
 }

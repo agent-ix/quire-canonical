@@ -12,12 +12,16 @@ use core::fmt;
 
 /// Which configured limit an encoding reached.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum LimitKind {
     /// The number of canonical output bytes ([`crate::Limits::max_bytes`]).
     CanonicalBytes,
     /// The number of input bytes a reader accepts (the `max_input_bytes`
     /// of [`crate::read`]).
     InputBytes,
+    /// The bytes of heap a reader may grow (the `max_working_bytes` of
+    /// [`crate::read_bounded`]).
+    WorkingBytes,
     /// The bytes one open object buffers for sorting. Member offsets are
     /// 32-bit, so this bound is fixed at `u32::MAX` and only matters when
     /// [`crate::Limits::max_bytes`] is set above it.
@@ -29,6 +33,7 @@ impl fmt::Display for LimitKind {
         formatter.write_str(match self {
             Self::CanonicalBytes => "canonical bytes",
             Self::InputBytes => "input bytes",
+            Self::WorkingBytes => "working bytes",
             Self::ObjectBytes => "object buffer bytes",
         })
     }
@@ -42,7 +47,8 @@ pub struct LimitExceeded {
     /// The configured bound for that limit.
     pub bound: u64,
     /// The amount needed when it was refused: the output length including
-    /// the bytes being written, or the input length. Always greater than
+    /// the bytes being written, the input length, or the working bytes
+    /// charged including the refused growth. Always greater than
     /// `bound`.
     pub required: u64,
 }

@@ -6,9 +6,27 @@
 //! growth happens, so a caller that meters memory charges exactly what the
 //! writer allocates, by construction rather than by a separate estimate.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::Error;
+
+/// Why a [`Provision`] refused a growth: the caller's reservation said no,
+/// or the allocator did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Refusal {
+    Denied { requested: usize },
+    Allocation { requested: usize },
+}
+
+impl From<Refusal> for Error {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Denied { requested } => Error::ReservationDenied { requested },
+            Refusal::Allocation { requested } => Error::Allocation { requested },
+        }
+    }
+}
 
 /// The smallest capacity a writer-owned list grows to.
 const MIN_CAPACITY: usize = 4;
@@ -66,39 +84,67 @@ impl<'r> Provision<'r> {
 
     /// Make room in `list` for `additional` more items, asking the
     /// reservation first.
-    pub(crate) fn grow<T>(&mut self, list: &mut Vec<T>, additional: usize) -> Result<(), Error> {
-        let capacity = list.capacity();
-        let Some(needed) = list.len().checked_add(additional) else {
-            return Err(allocation::<T>(additional));
+    pub(crate) fn grow<T>(&mut self, list: &mut Vec<T>, additional: usize) -> Result<(), Refusal> {
+        let size = core::mem::size_of::<T>();
+        let Some(target) = self.admit(list.len(), list.capacity(), additional, size)? else {
+            return Ok(());
+        };
+        list.try_reserve_exact(target - list.len())
+            .map_err(|_| allocation::<T>(target - list.capacity()))
+    }
+
+    /// As [`Provision::grow`], for the bytes of `text`.
+    pub(crate) fn grow_text(
+        &mut self,
+        text: &mut String,
+        additional: usize,
+    ) -> Result<(), Refusal> {
+        let Some(target) = self.admit(text.len(), text.capacity(), additional, 1)? else {
+            return Ok(());
+        };
+        text.try_reserve_exact(target - text.len())
+            .map_err(|_| Refusal::Allocation {
+                requested: target - text.capacity(),
+            })
+    }
+
+    /// The capacity a list of `length` items and `capacity` must grow to for
+    /// `additional` more, after the reservation admitted the whole new
+    /// capacity; `None` when it already fits.
+    fn admit(
+        &mut self,
+        length: usize,
+        capacity: usize,
+        additional: usize,
+        item_size: usize,
+    ) -> Result<Option<usize>, Refusal> {
+        let Some(needed) = length.checked_add(additional) else {
+            return Err(Refusal::Allocation {
+                requested: item_size.saturating_mul(additional),
+            });
         };
         if needed <= capacity {
-            return Ok(());
+            return Ok(None);
         }
         let target = needed.max(capacity.saturating_mul(2)).max(MIN_CAPACITY);
-        let bytes = core::mem::size_of::<T>().saturating_mul(target);
-        if let Some(reservation) = self.0.as_deref_mut() {
-            if reservation.reserve(bytes).is_err() {
-                return Err(Error::ReservationDenied { requested: bytes });
-            }
-        }
-        list.try_reserve_exact(target - list.len())
-            .map_err(|_| allocation::<T>(target - capacity))
+        self.charge(item_size.saturating_mul(target))?;
+        Ok(Some(target))
     }
 
     /// Ask the reservation for `bytes` that the caller is about to allocate
     /// itself.
-    pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), Error> {
+    pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), Refusal> {
         if let Some(reservation) = self.0.as_deref_mut() {
             if reservation.reserve(bytes).is_err() {
-                return Err(Error::ReservationDenied { requested: bytes });
+                return Err(Refusal::Denied { requested: bytes });
             }
         }
         Ok(())
     }
 }
 
-fn allocation<T>(additional: usize) -> Error {
-    Error::Allocation {
+fn allocation<T>(additional: usize) -> Refusal {
+    Refusal::Allocation {
         requested: core::mem::size_of::<T>().saturating_mul(additional),
     }
 }

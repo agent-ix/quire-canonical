@@ -463,7 +463,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     /// [`Error::Allocation`] when memory runs out. Either refuses the writer
     /// like any event.
     pub fn reserve_list<T>(&mut self, list: &mut Vec<T>, additional: usize) -> Result<(), Error> {
-        self.guard(|writer| writer.provision.grow(list, additional))
+        self.guard(|writer| writer.provision.grow(list, additional).map_err(Error::from))
     }
 
     /// Ask the reservation for `bytes` of the caller's own working heap, to be
@@ -474,7 +474,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     /// [`Error::ReservationDenied`] when the reservation refuses; the writer is
     /// then refused like after any event.
     pub fn reserve(&mut self, bytes: usize) -> Result<(), Error> {
-        self.guard(|writer| writer.provision.charge(bytes))
+        self.guard(|writer| writer.provision.charge(bytes).map_err(Error::from))
     }
 
     /// Refuse with `error`, found by an event source rather than by the

@@ -74,6 +74,37 @@ every writer: lists grow by doubling from a minimum of 4 with `try_reserve_exact
 instead of `Vec`'s own policy, and a writer that refuses an event drops its
 buffers at once instead of at drop.
 
+## Reader working-byte provision
+
+`read_with_reservation(input, max_input_bytes, reservation)` reads under the
+same `Reservation` the writer takes, so one caller meter can sit behind both.
+The encoded-input limit is checked first and before any parsing: an input over
+it is `ReadError::Limit` (`LimitKind::InputBytes`) whatever it contains, and
+the reservation is not asked anything. Past that, the reader asks
+`Reservation::reserve(bytes)` once before each growth of one of its lists
+(nodes, child ids, object members, decoded text, the open-container stack, the
+children of open containers, the duplicate-name sort buffer, and the pointer
+and lexeme of a number-out-of-range refusal, and the pointer of a
+duplicate-name refusal). The unit is the writer's: the
+bytes of the full new capacity, element size times new capacity, charged at
+each growth and never credited back, with each list grown to exactly that
+capacity. A denial is `ReadError::ReservationDenied { requested }`; nothing
+was allocated for the growth, the reader drops everything it holds and no
+document is returned. `read_bounded(input, max_input_bytes, max_working_bytes)`
+is the same with a cumulative byte count, refusing with `ReadError::Limit`
+(`LimitKind::WorkingBytes`, `bound` the provision, `required` the total
+including the refused growth).
+
+A `NumberOutOfRange` or `DuplicateName` refusal carries a charged JSON pointer
+(and lexeme), which it keeps for as long as the error lives; they are not
+part of the document. The scratch lists are dropped when the read returns; the `Document` keeps its
+node, child, member and text lists, `Document::retained_bytes`. A meter that
+does not refund already holds the document's charge; a refunding meter can
+release down to `retained_bytes` and the rest when the document drops.
+Decoding or copying the document afterwards is the caller's own growth,
+charged by the caller to the same meter. There is no depth counter or fixed
+size cap, and a document of any depth reads on a small thread stack.
+
 ## Numbers
 
 A `Value`'s integers follow the integer rule, not `read`'s rule for JSON
