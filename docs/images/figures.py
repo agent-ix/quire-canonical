@@ -105,7 +105,6 @@ REPOS = [
     (4, 1, "quire-contract-runtime", "runs generated checks", False),
     (0, 2, "quire-observation", "qualified observations", False),
     (1, 2, "quire-protocol", "protocol conformance", False),
-    (3, 2, "quire-eval", "evaluation core", False),
     (2, 2, "quire-analyze", "SMT consistency", False),
     (0, 3, "quire-mltl", "MLTL over observations", False),
 ]
@@ -119,7 +118,7 @@ FEEDS = [
     ("quire-observation", "quire-protocol"),
     ("quire-observation", "quire-mltl"),
 ]
-SHARED = ["quire-exact", "quire-semantic-value", "quire-walk", "quire-canonical",
+SHARED = ["quire-eval", "quire-exact", "quire-semantic-value", "quire-walk", "quire-canonical",
           "quire-verification-contracts"]
 
 
@@ -135,7 +134,7 @@ def ecosystem(here="quire-spec-language"):
         "quire-contract-ir feeds quire-analyze. quire-observation feeds quire-protocol and "
         "quire-mltl. Above the chain, quire-driver runs it, quire-integration tests it and "
         "quire-verification plans verification. Below it, shared libraries used throughout: "
-        "quire-exact, quire-semantic-value, quire-walk, quire-canonical and "
+        "quire-eval, quire-exact, quire-semantic-value, quire-walk, quire-canonical and "
         "quire-verification-contracts.",
     )
     w, h, step = 176, 50, 201
