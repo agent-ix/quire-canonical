@@ -96,6 +96,7 @@ To parse untrusted JSON, call `read(bytes, max_input_bytes)`, which returns a
 | `Writer` | Push-event encoder; refuses events out of order. |
 | `Writer::in_order_with_reservation`, `encode_in_order_with_reservation` | Metered encoder for members supplied in canonical order: streams every byte, refuses `Error::MemberOrder` instead of sorting, and holds heap in proportion to depth and name length, not to the value's length. |
 | `read`, `Document`, `NodeRef` | The shared reader of untrusted JSON, into an arena tree. Refuses malformed input with the byte offset, and numbers with no finite double with their JSON pointer. |
+| `read_with_reservation`, `read_exact_with_reservation` | The reader with a caller's `Reservation` asked before every allocation; the exact form reads twice and allocates each list of the document once, at its final size. |
 | `Document::extract_with_reservation` | Copies chosen subtrees into a new, exact-size `Document`, each list reserved once at its final size, so a caller can keep its payloads and drop the full document. |
 | `NodeId` | The opaque per-document node handle returned by `NodeRef::id` and taken by `Document::node`. |
 | `FixedShape` and `#[derive(FixedShape)]` | Marks serde types whose depth is fixed by their schema; a recursive type fails to compile. |

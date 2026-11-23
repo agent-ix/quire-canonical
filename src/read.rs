@@ -33,6 +33,12 @@
 //! four elements), so the bytes asked are the bytes requested from the
 //! allocator and no length-based estimate is involved.
 //!
+//! [`read_exact_with_reservation`] asks for no growth history: one parser,
+//! generic over what it builds, reads the input once to count each list and
+//! once to fill it, and each list of the document is reserved once at its
+//! exact final size. Its doc gives the bytes asked as a formula of the
+//! document, and the outcome order that differs under a tight budget.
+//!
 //! Retention: the sum of the bytes asked bounds the read's peak heap, since a
 //! growth that copies holds the old and the new block at once. When the read
 //! returns, the open-container stack, the scratch lists and the sort buffer
@@ -559,6 +565,88 @@ pub fn read_with_reservation(
     read_provisioned(input, max_input_bytes, Provision::new(reservation))
 }
 
+/// As [`read_with_reservation`], but every list of the [`Document`] is
+/// allocated once, at its exact final size, so the reservation is asked for
+/// the document itself rather than for its growth history.
+///
+/// The input is read twice by the one parser. Pass 1 runs the grammar with a
+/// builder that only counts: decoded text bytes `T`, nodes `V`, array child
+/// ids `I`, object members `M`, and the most children of open arrays `Hi`,
+/// of open objects `Hm`, and of one object whose names are sorted for the
+/// duplicate check `Ho`. Its only heap is the open-container stack, which
+/// grows as in [`read_with_reservation`] (doubling from four entries of 16
+/// bytes) to the deepest nesting `D` and is reused by pass 2. Pass 2 asks
+/// `reservation` once per list, before that list's one allocation, in the
+/// order text (`T` bytes), nodes (`32·V`), child ids (`8·I`), members
+/// (`24·M`), open-array children (`8·Hi`), open-object members (`32·Hm`)
+/// and sort buffer (`8·Ho`), skipping an empty list; then it fills them with
+/// the same grammar, and no list grows again. For an accepted input the
+/// bytes asked are therefore
+///
+/// ```text
+/// S(D) + T + 32·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+/// ```
+///
+/// where `S(D)` is the stack's growth (`16·(4 + 8 + … + c)` for the first
+/// doubling `c ≥ D`, zero when `D = 0`), a function of the document alone
+/// and less than [`read_with_reservation`] asks for the same input. The
+/// document's [`Document::retained_bytes`] is exactly
+/// `T + 32·V + 8·I + 24·M`. (The sizes are those of a 64-bit target.)
+///
+/// The document, and every refusal with its offset, pointer and lexeme, are
+/// those of [`read_with_reservation`] whenever `reservation` admits every
+/// request. Under a tight budget the order of outcomes can differ, because
+/// the arena is reserved before pass 2 reads anything:
+///
+/// * a malformed input is refused by pass 1, before any arena reservation,
+///   when no object of two or more members closes before the fault (so no
+///   duplicate name can come first). A malformed document is malformed
+///   whatever the budget, so this refusal can now come where the growing
+///   reader would have stopped on the budget;
+/// * otherwise a refusal (a duplicate name, a number with no finite double,
+///   or a malformed input after an object whose names are not yet checked)
+///   is made by pass 2, after it reserved the lists for the input up to the
+///   fault; under a budget too small for those, the outcome is
+///   [`ReadError::ReservationDenied`] where the growing reader, asking less
+///   by that point, could have reached the refusal.
+///
+/// ```
+/// use quire_canonical::{read, read_exact_with_reservation, Reservation, ReservationDenied};
+///
+/// struct Meter(Vec<usize>);
+/// impl Reservation for Meter {
+///     fn reserve(&mut self, bytes: usize) -> Result<(), ReservationDenied> {
+///         self.0.push(bytes);
+///         Ok(())
+///     }
+/// }
+///
+/// let input = br#"{"a":[1,2],"b":"x"}"#;
+/// let mut meter = Meter(Vec::new());
+/// let document = read_exact_with_reservation(input, 1024, &mut meter)?;
+/// assert_eq!(document, read(input, 1024)?);
+/// // Stack (4 entries), then text "a12bx" (5), 5 nodes, 2 child ids,
+/// // 2 members, 2 open-array children, 2 open-object members, sort buffer 2.
+/// assert_eq!(meter.0, [64, 5, 5 * 32, 2 * 8, 2 * 24, 2 * 8, 2 * 32, 2 * 8]);
+/// assert_eq!(document.retained_bytes(), 5 + 5 * 32 + 2 * 8 + 2 * 24);
+/// # Ok::<(), quire_canonical::ReadError>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`read_with_reservation`]: [`ReadError::Limit`] for an input over
+/// `max_input_bytes`, before anything is read or asked;
+/// [`ReadError::ReservationDenied`] when `reservation` refuses a request,
+/// with nothing allocated for it and nothing asked after it;
+/// [`ReadError::Allocation`] when the allocator refuses.
+pub fn read_exact_with_reservation(
+    input: &[u8],
+    max_input_bytes: u64,
+    reservation: &mut dyn Reservation,
+) -> Result<Document, ReadError> {
+    read_exact_provisioned(input, max_input_bytes, Provision::new(reservation))
+}
+
 /// As [`read`], with a working-byte provision of `max_working_bytes`: the
 /// total bytes of heap the reader may grow, charged cumulatively (see the
 /// module docs).
@@ -611,11 +699,9 @@ impl Reservation for WorkingBudget {
     }
 }
 
-fn read_provisioned(
-    input: &[u8],
-    max_input_bytes: u64,
-    provision: Provision<'_>,
-) -> Result<Document, ReadError> {
+/// Refuse an input over `max_input_bytes` before any of it is read, then
+/// check that it is UTF-8.
+fn admit(input: &[u8], max_input_bytes: u64) -> Result<&str, ReadError> {
     let length = u64::try_from(input.len()).unwrap_or(u64::MAX);
     if length > max_input_bytes {
         return Err(LimitExceeded {
@@ -625,11 +711,61 @@ fn read_provisioned(
         }
         .into());
     }
-    let source = core::str::from_utf8(input).map_err(|error| ReadError::Malformed {
+    core::str::from_utf8(input).map_err(|error| ReadError::Malformed {
         offset: error.valid_up_to(),
         kind: Malformed::InvalidUtf8,
-    })?;
-    Parser::new(source, provision).run()
+    })
+}
+
+fn read_provisioned(
+    input: &[u8],
+    max_input_bytes: u64,
+    provision: Provision<'_>,
+) -> Result<Document, ReadError> {
+    let source = admit(input, max_input_bytes)?;
+    let mut parser = Parser::new(source, provision, Vec::new(), Build::default());
+    let root = parser.run()?;
+    Ok(parser.builder.into_document(root))
+}
+
+fn read_exact_provisioned(
+    input: &[u8],
+    max_input_bytes: u64,
+    provision: Provision<'_>,
+) -> Result<Document, ReadError> {
+    let source = admit(input, max_input_bytes)?;
+    // Pass 1: the grammar with the counting builder. Its only heap is the
+    // open-container stack.
+    let mut counting = Parser::new(source, provision, Vec::new(), Count::default());
+    let counted = counting.run();
+    let Parser {
+        mut provision,
+        mut stack,
+        builder: count,
+        ..
+    } = counting;
+    match counted {
+        Ok(_) => {}
+        // No object of two or more members closed before the fault, so no
+        // duplicate name can precede it: this is the growing reader's first
+        // refusal too.
+        Err(malformed @ ReadError::Malformed { .. }) if !count.names_unchecked => {
+            return Err(malformed);
+        }
+        // A duplicate name may come first, or the refusal needs the decoded
+        // names for its pointer: pass 2 reads up to the fault and refuses
+        // exactly as the growing reader does.
+        Err(ReadError::Malformed { .. } | ReadError::NumberOutOfRange { .. }) => {}
+        Err(other) => return Err(other),
+    }
+    // Pass 2: every list once at its counted size, then the same grammar
+    // with the building builder. The stack keeps pass 1's capacity, which
+    // already holds the deepest nesting.
+    stack.clear();
+    let build = Build::exact(&count, &mut provision)?;
+    let mut parser = Parser::new(source, provision, stack, build);
+    let root = parser.run()?;
+    Ok(parser.builder.into_document(root))
 }
 
 /// What the parser expects next.
@@ -649,10 +785,11 @@ enum Expect {
 }
 
 /// One open container while reading.
+#[derive(Clone, Copy)]
 struct OpenContainer {
     object: bool,
-    /// Where this container's children start on the parser's
-    /// `scratch_members` (an object) or `scratch_items` (an array).
+    /// Where this container's children start on the builder's open-children
+    /// list of its kind ([`Builder::children`]).
     start: usize,
 }
 
@@ -665,16 +802,60 @@ struct PendingMember {
     id: usize,
 }
 
-struct Parser<'i, 'r> {
-    provision: Provision<'r>,
-    source: &'i str,
-    input: &'i [u8],
-    position: usize,
+/// What the parser does with what it reads. The parser owns the grammar,
+/// the position and the open-container stack; a builder owns every other
+/// list. [`Build`] makes the [`Document`]; [`Count`] only counts what
+/// [`Build`] would store, so both passes of [`read_exact_with_reservation`]
+/// run the one grammar.
+trait Builder {
+    /// The decoded text's length so far.
+    fn text_len(&self) -> usize;
+    /// Append `piece` to the decoded text.
+    fn append(&mut self, provision: &mut Provision<'_>, piece: &str) -> Result<(), ReadError>;
+    /// Create a node; its id.
+    fn node(&mut self, provision: &mut Provision<'_>, slot: Slot) -> Result<usize, ReadError>;
+    /// The nodes created so far.
+    fn node_count(&self) -> usize;
+    /// The length of the open-children list of open objects (`object`) or
+    /// open arrays.
+    fn children(&self, object: bool) -> usize;
+    /// A finished value `id` of the innermost open array.
+    fn push_item(&mut self, provision: &mut Provision<'_>, id: usize) -> Result<(), ReadError>;
+    /// A member name of the innermost open object.
+    fn push_member(
+        &mut self,
+        provision: &mut Provision<'_>,
+        member: PendingMember,
+    ) -> Result<(), ReadError>;
+    /// The value `id` of the innermost open object's last member; `false`
+    /// when that object has no member.
+    fn set_member_value(&mut self, id: usize) -> bool;
+    /// Close `open`, popped off `stack`: refuse a duplicate name in an
+    /// object, move its children to the document lists, and return its slot.
+    fn close(
+        &mut self,
+        provision: &mut Provision<'_>,
+        stack: &[OpenContainer],
+        open: OpenContainer,
+    ) -> Result<Slot, ReadError>;
+    /// The refusal for the number `literal` at `offset`, inside `stack`.
+    fn number_out_of_range(
+        &mut self,
+        provision: &mut Provision<'_>,
+        stack: &[OpenContainer],
+        offset: usize,
+        literal: &str,
+    ) -> ReadError;
+}
+
+/// The builder that makes the [`Document`], growing each list through the
+/// provision as it fills.
+#[derive(Default)]
+struct Build {
     text: String,
     slots: Vec<Slot>,
     items: Vec<usize>,
     members: Vec<(Range, usize)>,
-    stack: Vec<OpenContainer>,
     /// The children of every open array, innermost last.
     scratch_items: Vec<usize>,
     /// The members of every open object, innermost last.
@@ -683,67 +864,84 @@ struct Parser<'i, 'r> {
     order: Vec<usize>,
 }
 
-impl<'i, 'r> Parser<'i, 'r> {
-    fn new(source: &'i str, provision: Provision<'r>) -> Self {
-        Self {
-            provision,
-            source,
-            input: source.as_bytes(),
-            position: 0,
-            text: String::new(),
-            slots: Vec::new(),
-            items: Vec::new(),
-            members: Vec::new(),
-            stack: Vec::new(),
-            scratch_items: Vec::new(),
-            scratch_members: Vec::new(),
-            order: Vec::new(),
+/// Reserve `list` at exactly `length` elements, asking the provision for
+/// those bytes first; nothing at all for an empty list.
+fn reserve_exact<T>(
+    provision: &mut Provision<'_>,
+    list: &mut Vec<T>,
+    length: usize,
+) -> Result<(), ReadError> {
+    if length == 0 {
+        return Ok(());
+    }
+    let bytes = core::mem::size_of::<T>().saturating_mul(length);
+    provision.charge(bytes).map_err(ReadError::from)?;
+    list.try_reserve_exact(length)
+        .map_err(|_| ReadError::Allocation { requested: bytes })
+}
+
+impl Build {
+    /// A builder whose lists hold exactly what `count` counted, each reserved
+    /// once, in the order text, nodes, child ids, members, open-array
+    /// children, open-object members, duplicate-sort buffer.
+    fn exact(count: &Count, provision: &mut Provision<'_>) -> Result<Self, ReadError> {
+        let mut build = Self::default();
+        if count.text > 0 {
+            provision.charge(count.text).map_err(ReadError::from)?;
+            build
+                .text
+                .try_reserve_exact(count.text)
+                .map_err(|_| ReadError::Allocation {
+                    requested: count.text,
+                })?;
         }
+        reserve_exact(provision, &mut build.slots, count.slots)?;
+        reserve_exact(provision, &mut build.items, count.items)?;
+        reserve_exact(provision, &mut build.members, count.members)?;
+        reserve_exact(
+            provision,
+            &mut build.scratch_items,
+            count.scratch_items_peak,
+        )?;
+        reserve_exact(
+            provision,
+            &mut build.scratch_members,
+            count.scratch_members_peak,
+        )?;
+        reserve_exact(provision, &mut build.order, count.order_peak)?;
+        Ok(build)
     }
 
-    /// Append `piece` to the decoded text, asking the reservation first.
-    fn append(&mut self, piece: &str) -> Result<(), ReadError> {
-        self.provision
-            .grow_text(&mut self.text, piece.len())
-            .map_err(ReadError::from)?;
-        self.text.push_str(piece);
-        Ok(())
-    }
-
-    fn malformed(&self, offset: usize, kind: Malformed) -> ReadError {
-        ReadError::Malformed { offset, kind }
-    }
-
-    /// The refusal for the number `literal` at `offset`, with its JSON pointer.
-    fn number_out_of_range(&mut self, offset: usize, literal: &str) -> ReadError {
-        match self
-            .pointer(None)
-            .and_then(|pointer| Ok((pointer, self.owned(literal)?)))
-        {
-            Ok((pointer, lexeme)) => ReadError::NumberOutOfRange {
-                offset,
-                pointer,
-                lexeme,
-            },
-            Err(error) => error,
+    fn into_document(self, root: usize) -> Document {
+        Document {
+            text: self.text,
+            slots: self.slots,
+            items: self.items,
+            members: self.members,
+            root,
         }
     }
 
     /// An owned copy of `text`, charged to the reservation and reserved
     /// fallibly.
-    fn owned(&mut self, text: &str) -> Result<String, ReadError> {
+    fn owned(provision: &mut Provision<'_>, text: &str) -> Result<String, ReadError> {
         let mut copy = String::new();
-        self.provision
+        provision
             .grow_text(&mut copy, text.len())
             .map_err(ReadError::from)?;
         copy.push_str(text);
         Ok(copy)
     }
 
-    /// The RFC 6901 pointer of the value being read, from the open containers,
-    /// below the member `name` of the object whose members start at
-    /// `children_start` on `scratch_members` when given.
-    fn pointer(&mut self, below: Option<(Range, usize)>) -> Result<String, ReadError> {
+    /// The RFC 6901 pointer of the value being read, from the open containers
+    /// on `stack`, below the member `name` of the object whose members start
+    /// at `children_start` on `scratch_members` when given.
+    fn pointer(
+        &self,
+        provision: &mut Provision<'_>,
+        stack: &[OpenContainer],
+        below: Option<(Range, usize)>,
+    ) -> Result<String, ReadError> {
         enum Step {
             Index(usize),
             Name(Range),
@@ -756,30 +954,24 @@ impl<'i, 'r> Parser<'i, 'r> {
         let mut items_end = self.scratch_items.len();
         let mut members_end = self.scratch_members.len();
         if let Some((name, children_start)) = below {
-            self.provision
-                .grow(&mut steps, 1)
-                .map_err(ReadError::from)?;
+            provision.grow(&mut steps, 1).map_err(ReadError::from)?;
             steps.push(Step::Name(name));
             // The object being closed still has its members on the shared
             // list; the ones below it belong to the objects around it.
             members_end = children_start;
         }
-        for open in self.stack.iter().rev() {
+        for open in stack.iter().rev() {
             if open.object {
                 let member = members_end
                     .checked_sub(1)
                     .and_then(|index| self.scratch_members.get(index));
                 if let Some(member) = member {
-                    self.provision
-                        .grow(&mut steps, 1)
-                        .map_err(ReadError::from)?;
+                    provision.grow(&mut steps, 1).map_err(ReadError::from)?;
                     steps.push(Step::Name(member.name));
                 }
                 members_end = open.start;
             } else {
-                self.provision
-                    .grow(&mut steps, 1)
-                    .map_err(ReadError::from)?;
+                provision.grow(&mut steps, 1).map_err(ReadError::from)?;
                 steps.push(Step::Index(items_end.saturating_sub(open.start)));
                 items_end = open.start;
             }
@@ -804,7 +996,7 @@ impl<'i, 'r> Parser<'i, 'r> {
             length = length.saturating_add(1).saturating_add(part);
         }
         let mut pointer = String::new();
-        self.provision
+        provision
             .grow_text(&mut pointer, length)
             .map_err(ReadError::from)?;
         for step in steps.iter().rev() {
@@ -830,6 +1022,324 @@ impl<'i, 'r> Parser<'i, 'r> {
         Ok(pointer)
     }
 
+    /// Refuse the object whose members start at `start` on
+    /// `scratch_members` when two share a name, at the later one's offset.
+    fn check_unique_names(
+        &mut self,
+        provision: &mut Provision<'_>,
+        stack: &[OpenContainer],
+        start: usize,
+    ) -> Result<(), ReadError> {
+        let children = self.scratch_members.get(start..).unwrap_or_default();
+        if children.len() < 2 {
+            return Ok(());
+        }
+        let text = &self.text;
+        let name_of = |index: usize| {
+            children
+                .get(index)
+                .map(|member| {
+                    let name = text.get(member.name.start..member.name.end);
+                    (name.unwrap_or_default(), member.offset)
+                })
+                .unwrap_or_default()
+        };
+        self.order.clear();
+        provision
+            .grow(&mut self.order, children.len())
+            .map_err(ReadError::from)?;
+        self.order.extend(0..children.len());
+        self.order
+            .sort_unstable_by(|left, right| name_of(*left).cmp(&name_of(*right)));
+        let mut repeat = None;
+        for pair in self.order.windows(2) {
+            let [left, right] = pair else { continue };
+            let (left_name, _) = name_of(*left);
+            let (right_name, later) = name_of(*right);
+            if left_name == right_name {
+                // Sorted by (name, offset), so `right` is the later one.
+                repeat = children.get(*right).map(|member| (member.name, later));
+                break;
+            }
+        }
+        let Some((name, offset)) = repeat else {
+            return Ok(());
+        };
+        let pointer = self.pointer(provision, stack, Some((name, start)))?;
+        Err(ReadError::DuplicateName { offset, pointer })
+    }
+}
+
+impl Builder for Build {
+    fn text_len(&self) -> usize {
+        self.text.len()
+    }
+
+    fn append(&mut self, provision: &mut Provision<'_>, piece: &str) -> Result<(), ReadError> {
+        provision
+            .grow_text(&mut self.text, piece.len())
+            .map_err(ReadError::from)?;
+        self.text.push_str(piece);
+        Ok(())
+    }
+
+    fn node(&mut self, provision: &mut Provision<'_>, slot: Slot) -> Result<usize, ReadError> {
+        let id = self.slots.len();
+        provision
+            .grow(&mut self.slots, 1)
+            .map_err(ReadError::from)?;
+        self.slots.push(slot);
+        Ok(id)
+    }
+
+    fn node_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn children(&self, object: bool) -> usize {
+        if object {
+            self.scratch_members.len()
+        } else {
+            self.scratch_items.len()
+        }
+    }
+
+    fn push_item(&mut self, provision: &mut Provision<'_>, id: usize) -> Result<(), ReadError> {
+        provision
+            .grow(&mut self.scratch_items, 1)
+            .map_err(ReadError::from)?;
+        self.scratch_items.push(id);
+        Ok(())
+    }
+
+    fn push_member(
+        &mut self,
+        provision: &mut Provision<'_>,
+        member: PendingMember,
+    ) -> Result<(), ReadError> {
+        provision
+            .grow(&mut self.scratch_members, 1)
+            .map_err(ReadError::from)?;
+        self.scratch_members.push(member);
+        Ok(())
+    }
+
+    fn set_member_value(&mut self, id: usize) -> bool {
+        self.scratch_members
+            .last_mut()
+            .map(|member| member.id = id)
+            .is_some()
+    }
+
+    fn close(
+        &mut self,
+        provision: &mut Provision<'_>,
+        stack: &[OpenContainer],
+        open: OpenContainer,
+    ) -> Result<Slot, ReadError> {
+        Ok(if open.object {
+            self.check_unique_names(provision, stack, open.start)?;
+            let pending = self.scratch_members.get(open.start..).unwrap_or_default();
+            let start = self.members.len();
+            provision
+                .grow(&mut self.members, pending.len())
+                .map_err(ReadError::from)?;
+            self.members
+                .extend(pending.iter().map(|member| (member.name, member.id)));
+            self.scratch_members.truncate(open.start);
+            Slot::Object(Range {
+                start,
+                end: self.members.len(),
+            })
+        } else {
+            let items = self.scratch_items.get(open.start..).unwrap_or_default();
+            let start = self.items.len();
+            provision
+                .grow(&mut self.items, items.len())
+                .map_err(ReadError::from)?;
+            self.items.extend_from_slice(items);
+            self.scratch_items.truncate(open.start);
+            Slot::Array(Range {
+                start,
+                end: self.items.len(),
+            })
+        })
+    }
+
+    fn number_out_of_range(
+        &mut self,
+        provision: &mut Provision<'_>,
+        stack: &[OpenContainer],
+        offset: usize,
+        literal: &str,
+    ) -> ReadError {
+        match self
+            .pointer(provision, stack, None)
+            .and_then(|pointer| Ok((pointer, Self::owned(provision, literal)?)))
+        {
+            Ok((pointer, lexeme)) => ReadError::NumberOutOfRange {
+                offset,
+                pointer,
+                lexeme,
+            },
+            Err(error) => error,
+        }
+    }
+}
+
+/// The builder of pass 1 of [`read_exact_with_reservation`]: the lengths
+/// [`Build`] would reach, with no heap. Each list length is what `Build`
+/// would hold at the same point of the same input, so pass 2 never grows.
+#[derive(Default)]
+struct Count {
+    /// Decoded text bytes.
+    text: usize,
+    /// Nodes.
+    slots: usize,
+    /// Array child ids.
+    items: usize,
+    /// Object members.
+    members: usize,
+    /// Open-array children now, and at most.
+    scratch_items: usize,
+    scratch_items_peak: usize,
+    /// Open-object members now, and at most.
+    scratch_members: usize,
+    scratch_members_peak: usize,
+    /// The most members of one object whose names were sorted.
+    order_peak: usize,
+    /// An object of two or more members closed, so its names are unchecked
+    /// for duplicates until pass 2.
+    names_unchecked: bool,
+}
+
+impl Builder for Count {
+    fn text_len(&self) -> usize {
+        self.text
+    }
+
+    fn append(&mut self, _: &mut Provision<'_>, piece: &str) -> Result<(), ReadError> {
+        self.text = self.text.saturating_add(piece.len());
+        Ok(())
+    }
+
+    fn node(&mut self, _: &mut Provision<'_>, _: Slot) -> Result<usize, ReadError> {
+        let id = self.slots;
+        self.slots = self.slots.saturating_add(1);
+        Ok(id)
+    }
+
+    fn node_count(&self) -> usize {
+        self.slots
+    }
+
+    fn children(&self, object: bool) -> usize {
+        if object {
+            self.scratch_members
+        } else {
+            self.scratch_items
+        }
+    }
+
+    fn push_item(&mut self, _: &mut Provision<'_>, _: usize) -> Result<(), ReadError> {
+        self.scratch_items = self.scratch_items.saturating_add(1);
+        self.scratch_items_peak = self.scratch_items_peak.max(self.scratch_items);
+        Ok(())
+    }
+
+    fn push_member(&mut self, _: &mut Provision<'_>, _: PendingMember) -> Result<(), ReadError> {
+        self.scratch_members = self.scratch_members.saturating_add(1);
+        self.scratch_members_peak = self.scratch_members_peak.max(self.scratch_members);
+        Ok(())
+    }
+
+    fn set_member_value(&mut self, _: usize) -> bool {
+        self.scratch_members > 0
+    }
+
+    fn close(
+        &mut self,
+        _: &mut Provision<'_>,
+        _: &[OpenContainer],
+        open: OpenContainer,
+    ) -> Result<Slot, ReadError> {
+        Ok(if open.object {
+            let width = self.scratch_members.saturating_sub(open.start);
+            if width >= 2 {
+                self.order_peak = self.order_peak.max(width);
+                self.names_unchecked = true;
+            }
+            let start = self.members;
+            self.members = self.members.saturating_add(width);
+            self.scratch_members = open.start;
+            Slot::Object(Range {
+                start,
+                end: self.members,
+            })
+        } else {
+            let width = self.scratch_items.saturating_sub(open.start);
+            let start = self.items;
+            self.items = self.items.saturating_add(width);
+            self.scratch_items = open.start;
+            Slot::Array(Range {
+                start,
+                end: self.items,
+            })
+        })
+    }
+
+    /// A stand-in refusal with no pointer or lexeme (both empty, so nothing
+    /// is allocated); pass 2 makes the real one.
+    fn number_out_of_range(
+        &mut self,
+        _: &mut Provision<'_>,
+        _: &[OpenContainer],
+        offset: usize,
+        _: &str,
+    ) -> ReadError {
+        ReadError::NumberOutOfRange {
+            offset,
+            pointer: String::new(),
+            lexeme: String::new(),
+        }
+    }
+}
+
+struct Parser<'i, 'r, B> {
+    provision: Provision<'r>,
+    source: &'i str,
+    input: &'i [u8],
+    position: usize,
+    stack: Vec<OpenContainer>,
+    builder: B,
+}
+
+impl<'i, 'r, B: Builder> Parser<'i, 'r, B> {
+    fn new(
+        source: &'i str,
+        provision: Provision<'r>,
+        stack: Vec<OpenContainer>,
+        builder: B,
+    ) -> Self {
+        Self {
+            provision,
+            source,
+            input: source.as_bytes(),
+            position: 0,
+            stack,
+            builder,
+        }
+    }
+
+    /// Append `piece` to the decoded text, asking the reservation first.
+    fn append(&mut self, piece: &str) -> Result<(), ReadError> {
+        self.builder.append(&mut self.provision, piece)
+    }
+
+    fn malformed(&self, offset: usize, kind: Malformed) -> ReadError {
+        ReadError::Malformed { offset, kind }
+    }
+
     fn peek(&self) -> Option<u8> {
         self.input.get(self.position).copied()
     }
@@ -850,7 +1360,8 @@ impl<'i, 'r> Parser<'i, 'r> {
         }
     }
 
-    fn run(mut self) -> Result<Document, ReadError> {
+    /// Read the whole input; the root's node id.
+    fn run(&mut self) -> Result<usize, ReadError> {
         let mut expect = Expect::Value;
         let root = loop {
             self.skip_whitespace();
@@ -876,7 +1387,7 @@ impl<'i, 'r> Parser<'i, 'r> {
                 }
                 Expect::Separator => {
                     let Some(open) = self.stack.last() else {
-                        break self.slots.len().checked_sub(1);
+                        break self.builder.node_count().checked_sub(1);
                     };
                     let object = open.object;
                     match self.peek() {
@@ -909,14 +1420,7 @@ impl<'i, 'r> Parser<'i, 'r> {
         }
         // The top-level value is the last node created: a container's node
         // is created when it closes, after all of its children.
-        let root = root.ok_or_else(|| self.malformed(self.position, Malformed::UnexpectedEnd))?;
-        Ok(Document {
-            text: self.text,
-            slots: self.slots,
-            items: self.items,
-            members: self.members,
-            root,
-        })
+        root.ok_or_else(|| self.malformed(self.position, Malformed::UnexpectedEnd))
     }
 
     /// Read the value starting at the current position.
@@ -934,11 +1438,7 @@ impl<'i, 'r> Parser<'i, 'r> {
                     .map_err(ReadError::from)?;
                 self.stack.push(OpenContainer {
                     object,
-                    start: if object {
-                        self.scratch_members.len()
-                    } else {
-                        self.scratch_items.len()
-                    },
+                    start: self.builder.children(object),
                 });
                 return Ok(if object {
                     Expect::NameOrEnd
@@ -967,32 +1467,22 @@ impl<'i, 'r> Parser<'i, 'r> {
     }
 
     fn node(&mut self, slot: Slot) -> Result<usize, ReadError> {
-        let id = self.slots.len();
-        self.provision
-            .grow(&mut self.slots, 1)
-            .map_err(ReadError::from)?;
-        self.slots.push(slot);
-        Ok(id)
+        self.builder.node(&mut self.provision, slot)
     }
 
     /// Attach a finished value to its container, or make it the root.
     fn complete(&mut self, id: usize) -> Result<Expect, ReadError> {
         match self.stack.last() {
             Some(OpenContainer { object: true, .. }) => {
-                let member = self
-                    .scratch_members
-                    .last_mut()
-                    .ok_or(ReadError::Malformed {
+                if !self.builder.set_member_value(id) {
+                    return Err(ReadError::Malformed {
                         offset: self.position,
                         kind: Malformed::UnexpectedCharacter,
-                    })?;
-                member.id = id;
+                    });
+                }
             }
             Some(OpenContainer { object: false, .. }) => {
-                self.provision
-                    .grow(&mut self.scratch_items, 1)
-                    .map_err(ReadError::from)?;
-                self.scratch_items.push(id);
+                self.builder.push_item(&mut self.provision, id)?;
             }
             None => {}
         }
@@ -1011,15 +1501,14 @@ impl<'i, 'r> Parser<'i, 'r> {
             return Err(self.unexpected());
         }
         self.position += 1;
-        self.provision
-            .grow(&mut self.scratch_members, 1)
-            .map_err(ReadError::from)?;
-        self.scratch_members.push(PendingMember {
-            name,
-            offset,
-            id: 0,
-        });
-        Ok(())
+        self.builder.push_member(
+            &mut self.provision,
+            PendingMember {
+                name,
+                offset,
+                id: 0,
+            },
+        )
     }
 
     /// Close the innermost container, whose closing byte has been consumed.
@@ -1031,82 +1520,15 @@ impl<'i, 'r> Parser<'i, 'r> {
         if open.object != object {
             return Err(self.malformed(closing, Malformed::UnexpectedCharacter));
         }
-        let slot = if object {
-            self.check_unique_names(open.start)?;
-            let pending = self.scratch_members.get(open.start..).unwrap_or_default();
-            let start = self.members.len();
-            self.provision
-                .grow(&mut self.members, pending.len())
-                .map_err(ReadError::from)?;
-            self.members
-                .extend(pending.iter().map(|member| (member.name, member.id)));
-            self.scratch_members.truncate(open.start);
-            Slot::Object(Range {
-                start,
-                end: self.members.len(),
-            })
-        } else {
-            let items = self.scratch_items.get(open.start..).unwrap_or_default();
-            let start = self.items.len();
-            self.provision
-                .grow(&mut self.items, items.len())
-                .map_err(ReadError::from)?;
-            self.items.extend_from_slice(items);
-            self.scratch_items.truncate(open.start);
-            Slot::Array(Range {
-                start,
-                end: self.items.len(),
-            })
-        };
+        let slot = self.builder.close(&mut self.provision, &self.stack, open)?;
         self.node(slot)
     }
 
-    /// Refuse the object whose members start at `start` on
-    /// `scratch_members` when two share a name, at the later one's offset.
-    fn check_unique_names(&mut self, start: usize) -> Result<(), ReadError> {
-        let children = self.scratch_members.get(start..).unwrap_or_default();
-        if children.len() < 2 {
-            return Ok(());
-        }
-        let text = &self.text;
-        let name_of = |index: usize| {
-            children
-                .get(index)
-                .map(|member| {
-                    let name = text.get(member.name.start..member.name.end);
-                    (name.unwrap_or_default(), member.offset)
-                })
-                .unwrap_or_default()
-        };
-        self.order.clear();
-        self.provision
-            .grow(&mut self.order, children.len())
-            .map_err(ReadError::from)?;
-        self.order.extend(0..children.len());
-        self.order
-            .sort_unstable_by(|left, right| name_of(*left).cmp(&name_of(*right)));
-        let mut repeat = None;
-        for pair in self.order.windows(2) {
-            let [left, right] = pair else { continue };
-            let (left_name, _) = name_of(*left);
-            let (right_name, later) = name_of(*right);
-            if left_name == right_name {
-                // Sorted by (name, offset), so `right` is the later one.
-                repeat = children.get(*right).map(|member| (member.name, later));
-                break;
-            }
-        }
-        let Some((name, offset)) = repeat else {
-            return Ok(());
-        };
-        let pointer = self.pointer(Some((name, start)))?;
-        Err(ReadError::DuplicateName { offset, pointer })
-    }
-
-    /// Read the string starting at the current `"`, decoding it into `text`.
+    /// Read the string starting at the current `"`, decoding it into the
+    /// text.
     fn string(&mut self) -> Result<Range, ReadError> {
         self.position += 1;
-        let start = self.text.len();
+        let start = self.builder.text_len();
         loop {
             let run_start = self.position;
             while let Some(byte) = self.peek() {
@@ -1127,7 +1549,7 @@ impl<'i, 'r> Parser<'i, 'r> {
                     self.position += 1;
                     return Ok(Range {
                         start,
-                        end: self.text.len(),
+                        end: self.builder.text_len(),
                     });
                 }
                 Some(b'\\') => self.escape()?,
@@ -1233,14 +1655,19 @@ impl<'i, 'r> Parser<'i, 'r> {
         let literal = self.source.get(start..self.position).unwrap_or_default();
         let value: f64 = literal.parse().map_err(|_| invalid(self))?;
         if !value.is_finite() {
-            return Err(self.number_out_of_range(start, literal));
+            return Err(self.builder.number_out_of_range(
+                &mut self.provision,
+                &self.stack,
+                start,
+                literal,
+            ));
         }
-        let text_start = self.text.len();
+        let text_start = self.builder.text_len();
         self.append(literal)?;
         Ok(Slot::Number {
             text: Range {
                 start: text_start,
-                end: self.text.len(),
+                end: self.builder.text_len(),
             },
             value,
         })
