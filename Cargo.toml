@@ -1,6 +1,6 @@
 [package]
 name = "quire-canonical"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.81"
 description = "Streaming RFC 8785 (JCS) canonical JSON writer that hashes as it encodes."
@@ -59,6 +59,7 @@ serde_json = { version = "1", optional = true, default-features = false, feature
 ] }
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip`: the vector file's float literals must parse to the exact
 # nearest double, or a vector would test the parser rather than the encoder.

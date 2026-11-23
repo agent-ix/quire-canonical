@@ -87,6 +87,15 @@ pub(crate) fn cmp_member_names(left: &[u8], right: &[u8]) -> Ordering {
     }
 }
 
+/// Compare two member names, given as their UTF-8 bytes, by UTF-16 code
+/// unit: the order [`cmp_member_names`] gives the same names buffered.
+pub(crate) fn cmp_names(left: &[u8], right: &[u8]) -> Ordering {
+    match left.iter().zip(right).find(|(a, b)| a != b) {
+        Some((a, b)) => utf16_order_of_first_difference(*a, *b),
+        None => left.len().cmp(&right.len()),
+    }
+}
+
 fn utf16_order_of_first_difference(left: u8, right: u8) -> Ordering {
     let high_bmp = |byte: u8| byte == 0xEE || byte == 0xEF;
     let supplementary = |byte: u8| byte >= 0xF0;
@@ -107,7 +116,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use super::{cmp_member_names, Unescaped};
+    use super::{cmp_member_names, cmp_names, Unescaped};
     use crate::escape::escape_fragment;
 
     fn member(name: &str) -> Vec<u8> {
@@ -156,7 +165,7 @@ mod tests {
     }
 
     /// Every pair of one- and two-character names orders exactly as the
-    /// reference UTF-16 comparison does.
+    /// reference UTF-16 comparison does, buffered and raw.
     #[test]
     fn agrees_with_utf16_code_unit_order_on_every_sample_pair() {
         let mut names: Vec<String> = SAMPLES.iter().map(|name| (*name).to_owned()).collect();
@@ -172,6 +181,11 @@ mod tests {
                     cmp_member_names(&member(left), &member(right)),
                     expected,
                     "{left:?} vs {right:?}"
+                );
+                assert_eq!(
+                    cmp_names(left.as_bytes(), right.as_bytes()),
+                    expected,
+                    "raw {left:?} vs {right:?}"
                 );
             }
         }

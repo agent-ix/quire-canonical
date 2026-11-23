@@ -72,6 +72,13 @@
 //! 32x for a deep chain of objects, the worst shape per byte. [`read`] peaks
 //! under 64x its input length.
 //!
+//! A caller that already holds members in canonical order, such as one
+//! re-encoding a [`Document`] read from canonical text, can skip the sort:
+//! [`Writer::in_order_with_reservation`] and
+//! [`encode_in_order_with_reservation`] stream objects too, check the order
+//! instead (refusing [`Error::MemberOrder`]), and hold heap in proportion to
+//! the value's depth and name lengths only.
+//!
 //! ```
 //! use quire_canonical::{to_vec, FixedShape, Limits};
 //!
@@ -233,6 +240,65 @@ where
     T: Encode + ?Sized,
 {
     let mut writer = Writer::with_reservation(sink, limits, reservation);
+    value.encode_into(&mut writer)?;
+    writer.finish()
+}
+
+/// As [`encode_with_reservation`], through an in-order writer (see
+/// [`Writer::in_order_with_reservation`]): `value` must push every object's
+/// members in RFC 8785 order, and each canonical byte reaches `sink` as it is
+/// produced, with no sort buffer and no held output.
+///
+/// For a `value` whose members arrive in that order, the bytes written are
+/// exactly those of [`encode_with_reservation`]. A [`Document`] read from
+/// canonical text is such a value, so encoding it this way into a comparing
+/// sink checks that the text is canonical without a copy of it: an input
+/// that is not canonical is refused with [`Error::MemberOrder`] or differs
+/// from the bytes produced.
+///
+/// ```
+/// use quire_canonical::{
+///     encode_in_order_with_reservation, read, Error, Limits, Reservation, ReservationDenied,
+/// };
+///
+/// struct Unmetered;
+/// impl Reservation for Unmetered {
+///     fn reserve(&mut self, _bytes: usize) -> Result<(), ReservationDenied> {
+///         Ok(())
+///     }
+/// }
+///
+/// let canonical = br#"{"a":[1,{"c":null,"d":true}],"b":"x"}"#;
+/// let document = read(canonical, 1024).expect("reads");
+/// let mut bytes = Vec::new();
+/// encode_in_order_with_reservation(&mut bytes, &document, Limits::new(1024), &mut Unmetered)?;
+/// assert_eq!(bytes, canonical);
+///
+/// let unsorted = read(br#"{"b":"x","a":1}"#, 1024).expect("reads");
+/// let refused = encode_in_order_with_reservation(
+///     &mut Vec::new(), &unsorted, Limits::new(1024), &mut Unmetered,
+/// );
+/// assert!(matches!(refused, Err(Error::MemberOrder { depth: 0 })));
+/// # Ok::<(), quire_canonical::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`encode_with_reservation`], and [`Error::MemberOrder`] when a member
+/// name does not sort strictly after the previous one of its object. On any
+/// error the sink holds a prefix of the canonical text, which is not
+/// canonical output and must be discarded.
+pub fn encode_in_order_with_reservation<S, T>(
+    sink: &mut S,
+    value: &T,
+    limits: Limits,
+    reservation: &mut dyn Reservation,
+) -> Result<u64, Error>
+where
+    S: Sink + ?Sized,
+    T: Encode + ?Sized,
+{
+    let mut writer = Writer::in_order_with_reservation(sink, limits, reservation);
     value.encode_into(&mut writer)?;
     writer.finish()
 }

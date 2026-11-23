@@ -41,7 +41,9 @@ Nothing recurses in proportion to its input, and depth is unbounded. Only byte
 limits apply, and a value over a limit is refused with an error.
 Arrays and scalars stream to the sink. While an object is open its bytes are
 buffered so its members can be sorted, so a top-level object is held whole
-before the first byte is hashed. See [docs/encoding.md](docs/encoding.md).
+before the first byte is hashed. A caller whose members already arrive in
+canonical order can use the in-order writer instead, which streams objects too
+and checks the order rather than sorting. See [docs/encoding.md](docs/encoding.md).
 
 ## Usage
 
@@ -92,6 +94,7 @@ To parse untrusted JSON, call `read(bytes, max_input_bytes)`, which returns a
 | --- | --- |
 | `to_vec`, `sha256`, `sha256_with_domain`, `encode` | Encode any `Encode` value to bytes, to a digest, to a domain-labeled digest, or into a `Sink`. |
 | `Writer` | Push-event encoder; refuses events out of order. |
+| `Writer::in_order_with_reservation`, `encode_in_order_with_reservation` | Metered encoder for members supplied in canonical order: streams every byte, refuses `Error::MemberOrder` instead of sorting, and holds heap in proportion to depth and name length, not to the value's length. |
 | `read`, `Document`, `NodeRef` | The shared reader of untrusted JSON, into an arena tree. Refuses malformed input with the byte offset, and numbers with no finite double with their JSON pointer. |
 | `NodeId` | The opaque per-document node handle returned by `NodeRef::id` and taken by `Document::node`. |
 | `FixedShape` and `#[derive(FixedShape)]` | Marks serde types whose depth is fixed by their schema; a recursive type fails to compile. |
