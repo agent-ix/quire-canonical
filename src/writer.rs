@@ -316,7 +316,7 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     /// never re-sorted. For every value whose members arrive in that order the
     /// output is byte-for-byte that of [`Writer::with_reservation`], and the
     /// same scalar and protocol refusals apply (see [`Error::MemberOrder`]
-    /// for the two differences in refusals).
+    /// for the differences in refusals).
     ///
     /// `reservation` is asked before every growth of the writer's heap, as
     /// for [`Writer::with_reservation`]. That heap is the stack of open
@@ -824,14 +824,17 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             }
             self.produce(b",")?;
         }
+        // Count and write the name before keeping a copy of it, so the copy
+        // is never larger than bytes already admitted under the ceiling.
+        self.quoted(name)?;
+        self.produce(b":")?;
         self.names.truncate(start);
         self.provision.grow(&mut self.names, name.len())?;
         self.names.extend_from_slice(name.as_bytes());
         let frame = self.top_ordered()?;
         frame.named = true;
         frame.pending = true;
-        self.quoted(name)?;
-        self.produce(b":")
+        Ok(())
     }
 
     /// Close the innermost in-order object, whose members are already out.

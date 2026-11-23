@@ -153,18 +153,28 @@ pub enum Error {
     /// It takes the place of two refusals of the sorting writer: a repeated
     /// name, which that writer refuses with [`Error::DuplicateMemberName`]
     /// when the object closes, and an out-of-order name, which that writer
-    /// accepts and sorts. The in-order writer also counts each comma between
-    /// members against [`crate::Limits::max_bytes`] when it writes it, where
-    /// the sorting writer counts them all when the object closes. Both refuse
-    /// a value past the byte ceiling with [`Error::Limit`], but the
-    /// `required` amount can differ, and a value that also holds another
-    /// refusal can meet the ceiling first in one writer and the other
-    /// refusal first in the other. The in-order writer buffers nothing, so
-    /// it never refuses with [`LimitKind::ObjectBytes`].
+    /// accepts and sorts.
+    ///
+    /// Differences a caller can see against the sorting writer:
+    ///
+    /// * Members out of order whose canonical form is past
+    ///   [`crate::Limits::max_bytes`]: when the misordered name comes before
+    ///   the point where the ceiling is reached, this writer refuses
+    ///   `MemberOrder` where the sorting writer refuses [`Error::Limit`].
+    /// * The in-order writer counts each comma between members against the
+    ///   ceiling when it writes it; the sorting writer counts them all when
+    ///   the object closes. Both refuse a value past the ceiling with
+    ///   [`Error::Limit`], but its `required` amount can differ, and a value
+    ///   that also holds another refusal can meet the ceiling first in one
+    ///   writer and the other refusal first in the other.
+    /// * The in-order writer buffers nothing, so it never refuses with
+    ///   [`LimitKind::ObjectBytes`].
     #[error("member name out of canonical order in an object at depth {depth}")]
     MemberOrder {
-        /// The number of containers enclosing the object: 0 for a top-level
-        /// object.
+        /// The number of open containers enclosing the object: 0 for a
+        /// top-level object. serde's one-member `{"variant":value}` wrapper for
+        /// an externally tagged enum is a container here, so an object inside
+        /// a top-level enum variant is at depth 1.
         depth: usize,
     },
     /// A `serde_json` private-token struct, emitted when `serde_json`'s

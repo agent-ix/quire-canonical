@@ -338,8 +338,19 @@ proptest! {
         for ceiling in [0, length / 2, length.saturating_sub(1), length, length + slack] {
             let limits = Limits::new(ceiling);
             let (sorted, _) = sorted_bytes(&value, limits);
-            let (outcome, bytes) = in_order_bytes(&value, limits);
+            let mut admitting = Hook::admitting();
+            let mut bytes = Vec::new();
+            let outcome =
+                encode_in_order_with_reservation(&mut bytes, &value, limits, &mut admitting);
             prop_assert!(bytes.len() as u64 <= ceiling);
+            // A reservation that denies every growth past those this run made
+            // changes nothing: the ceiling, not the reservation, stops it.
+            let mut denying = Hook::denying_call(admitting.calls);
+            let mut kept = Vec::new();
+            let denied = encode_in_order_with_reservation(&mut kept, &value, limits, &mut denying);
+            prop_assert_eq!(format!("{:?}", &denied), format!("{:?}", &outcome));
+            prop_assert_eq!(kept, bytes);
+            prop_assert_eq!(denying.calls, admitting.calls);
             match (sorted, outcome) {
                 (Ok(left), Ok(right)) => prop_assert_eq!(left, right),
                 (Err(Error::Limit(left)), Err(Error::Limit(right))) => {
@@ -596,4 +607,52 @@ fn member_order_displays_its_depth() {
         Error::MemberOrder { depth: 3 }.to_string(),
         "member name out of canonical order in an object at depth 3"
     );
+}
+
+/// A name is counted against the byte ceiling before the writer keeps a copy
+/// of it: a name past the ceiling is refused with `Limit` and never reserved,
+/// even under a reservation that denies the copy.
+#[test]
+fn a_name_past_the_ceiling_is_refused_before_it_is_kept() {
+    let long = "n".repeat(64);
+    let push = |writer: &mut Writer<'_, Vec<u8>>| {
+        writer.begin_object()?;
+        writer.name(&long)?;
+        writer.null()?;
+        writer.end_object()
+    };
+    let limits = Limits::new(16);
+    // Opening the object makes two growths (object record, container
+    // stack); the third, the kept name, is denied.
+    let mut hook = Hook::denying_call(2);
+    let mut bytes = Vec::new();
+    let outcome = {
+        let mut writer = Writer::in_order_with_reservation(&mut bytes, limits, &mut hook);
+        push(&mut writer).and_then(|()| writer.finish())
+    };
+    assert!(
+        matches!(outcome, Err(Error::Limit(ref limit)) if limit.kind == LimitKind::CanonicalBytes),
+        "{outcome:?}"
+    );
+    assert_eq!(hook.calls, 2, "the name was reserved");
+    assert!(bytes.len() <= 16);
+    let mut sorted = Vec::new();
+    let mut admitting = Hook::admitting();
+    let mut writer = Writer::with_reservation(&mut sorted, limits, &mut admitting);
+    assert!(matches!(push(&mut writer), Err(Error::Limit(_))));
+}
+
+#[derive(Serialize, FixedShape)]
+#[allow(dead_code)]
+enum Wrapped {
+    Fields { b: u8, a: u8 },
+}
+
+/// serde's enum wrapper counts as an enclosing container.
+#[test]
+fn member_order_depth_counts_the_enum_wrapper() {
+    assert!(matches!(
+        in_order_bytes(&Wrapped::Fields { b: 1, a: 2 }, LIMITS).0,
+        Err(Error::MemberOrder { depth: 1 })
+    ));
 }
