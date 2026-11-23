@@ -124,6 +124,44 @@ Decoding or copying the document afterwards is the caller's own growth,
 charged by the caller to the same meter. There is no depth counter or fixed
 size cap, and a document of any depth reads on a small thread stack.
 
+## Exact-size read
+
+`read_exact_with_reservation(input, max_input_bytes, reservation)` reads the
+same documents and makes the same refusals as `read_with_reservation`, but it
+does not ask for any growth history. The input is read twice by one parser
+that is generic over a builder. Pass 1 builds nothing; it counts decoded
+text bytes `T`, nodes `V`, array child ids `I` and object members `M`, and
+the high-water marks of the children of open arrays `Hi`, of open objects
+`Hm`, and of the duplicate-name sort buffer `Ho`. Its only heap is the
+open-container stack, which grows as it does in the growing reader and is
+reused by pass 2. Pass 2 asks the reservation once per non-empty list, before
+that list's one allocation, in the order text, nodes, child ids, members,
+open-array children, open-object members and sort buffer. It then fills the
+lists, and none of them grows again. For an accepted input the bytes asked
+are
+
+```text
+S(D) + T + 32·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+```
+
+`S(D)` is the stack's growth to the deepest nesting `D`, and the sizes are
+those of a 64-bit target. The total is always below what
+`read_with_reservation` asks for the same input. `Document::retained_bytes`
+is exactly `T + 32·V + 8·I + 24·M`. For a root object of small records, the
+growing reader asks 18x to 22x the input at 1k to 100k members, against
+about 7.3x here, and retains 8.4x to 10.3x, against 6.4x to 6.7x here.
+
+The outcome is the same as the growing reader's whenever the reservation
+admits every request. Under a tight budget, two orders change:
+
+* A malformed input is refused by pass 1, before any arena reservation, when
+  no object of two or more members closes before the fault. The refusal can
+  therefore come where the growing reader would have stopped on the budget.
+* Pass 2 reserves the lists for the input up to the fault before it reads
+  anything. A duplicate name, or a number with no finite double, can
+  therefore become `ReadError::ReservationDenied` where the growing reader,
+  having asked less by that point, would reach the refusal.
+
 ## Numbers
 
 A `Value`'s integers follow the integer rule, not `read`'s rule for JSON
