@@ -79,6 +79,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::reservation::{Provision, Refusal};
+mod extract;
+
+pub use extract::ExtractError;
+
 use crate::{
     Encode, Error, LimitExceeded, LimitKind, Reservation, ReservationDenied, Sink, Writer,
 };

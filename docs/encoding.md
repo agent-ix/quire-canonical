@@ -162,6 +162,33 @@ admits every request. Under a tight budget, two orders change:
   therefore become `ReadError::ReservationDenied` where the growing reader,
   having asked less by that point, would reach the refusal.
 
+## Extracting payloads
+
+`Document::extract_with_reservation(roots, reservation)` builds a new
+`Document` that holds a copy of each subtree in `roots` and nothing else, so a
+caller that needs a few payloads of a large document can keep those and drop
+the source. The new document's root is an array whose element `i` is the copy
+of `roots[i]`, and the returned `Vec<NodeId>` names the copies in the same
+order. Each copy has the source's values, member order and number spellings,
+so it encodes to the same canonical bytes. Every root is copied on its own: a
+root given twice, or one inside another given root, is copied twice.
+
+The reader's arena is in post-order, so each subtree is one contiguous run of
+ids. A first pass finds the run by following first children and counts its
+text, values, array elements and members, with no heap and no recursion. The
+second pass asks the reservation once per list, in the order text, values,
+elements, members, returned ids, each for its exact final capacity and before
+its only allocation; a list of zero bytes is not asked for. With `T` decoded
+text bytes, `S` values, `I` array elements and `M` members summed over the
+copied subtrees, and `k` roots, that is `T + 32(S + 1) + 8(I + k) + 24M + 8k`
+bytes on a 64-bit target, of which the document retains all but the `8k` of
+returned ids. The size depends on the selected subtrees only.
+
+A denial is `ExtractError::ReservationDenied { requested }`: nothing more is
+asked or allocated, what was allocated is dropped, and the source is never
+changed. A root that is not a value of the document is
+`ExtractError::UnknownNode`, refused before any request.
+
 ## Numbers
 
 A `Value`'s integers follow the integer rule, not `read`'s rule for JSON
