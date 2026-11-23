@@ -74,6 +74,25 @@ every writer: lists grow by doubling from a minimum of 4 with `try_reserve_exact
 instead of `Vec`'s own policy, and a writer that refuses an event drops its
 buffers at once instead of at drop.
 
+## In-order writer
+
+`Writer::in_order_with_reservation` (and `encode_in_order_with_reservation`)
+is a metered writer for a caller that supplies every object's members already
+in RFC 8785 order, such as one re-encoding a `Document` read from canonical
+text to check that the text is canonical. It does not sort and holds no
+output: every canonical byte, objects included, goes to the sink as it is
+produced. Each member name must sort strictly after the previous name of the
+same object by UTF-16 code unit; otherwise, a repeated name included, the
+writer refuses with `Error::MemberOrder { depth }` and never re-sorts.
+
+For a value whose members arrive in order, the bytes are exactly those of
+`encode_with_reservation`, and the scalar and protocol refusals are the same.
+Its heap is the container stack, a record per open object and each open
+object's previous member name, charged to the reservation like every other
+list: proportional to depth and name length, not to the value's length. A
+refusal leaves the prefix produced so far in the sink, so only `finish`
+returning `Ok` certifies the sink's content.
+
 ## Reader working-byte provision
 
 `read_with_reservation(input, max_input_bytes, reservation)` reads under the

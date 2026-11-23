@@ -81,6 +81,24 @@
 //!
 //! A caller's own [`crate::Encode`] implementation charges the working lists it
 //! allocates through [`Writer::reserve_list`] and [`Writer::reserve`].
+//!
+//! # In-order writer
+//!
+//! [`Writer::in_order_with_reservation`] is a metered writer for a caller that
+//! already supplies every object's members in canonical order, such as one
+//! re-encoding a document it read from canonical text. It neither sorts nor
+//! holds output: each canonical byte goes to the sink as it is produced,
+//! objects included. Instead of sorting, it checks the order: each member name
+//! must sort strictly after the previous name of the same object, or the name
+//! is refused with [`Error::MemberOrder`], so a duplicate name is refused the
+//! same way. A refusal leaves the prefix produced so far in the sink.
+//!
+//! Its only heap is the stack of open containers (2 bytes per entry), a record
+//! per open object (16 bytes on a 64-bit target), and the previous member
+//! name of each open object, kept as its UTF-8 bytes in one list: a value of
+//! depth `d` whose longest name is `L` bytes holds `O(d * L)` bytes, whatever
+//! its length. The lists grow and are charged exactly as the sorting writer's
+//! are.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -88,7 +106,7 @@ use core::fmt;
 
 use crate::escape::escape_fragment;
 use crate::number::{exact_integer_double, with_double_text};
-use crate::order::{cmp_member_names, Unescaped};
+use crate::order::{cmp_member_names, cmp_names, Unescaped};
 use crate::reservation::Provision;
 use crate::{
     Error, FixedShape, LimitExceeded, LimitKind, Limits, ProtocolViolation, Reservation, Sink,
@@ -135,6 +153,18 @@ struct Closed {
     children: Span,
 }
 
+/// An open object of an in-order writer. Its previous member name sits on
+/// `Writer::names` from `names` up; an inner object's name sits above it and
+/// leaves when the inner object closes.
+struct Ordered {
+    /// Where its previous member name starts on `Writer::names`.
+    names: usize,
+    /// Whether it has a member yet, so `names` holds a name to compare with.
+    named: bool,
+    /// Whether a member's name is written and its value is not yet.
+    pending: bool,
+}
+
 /// One open container on the writer's stack.
 #[derive(Clone, Copy)]
 enum Open {
@@ -142,6 +172,9 @@ enum Open {
     Array { first: bool },
     /// An object; its members are buffered in the innermost [`Frame`].
     Object,
+    /// An object of an in-order writer; its members stream, and its state is
+    /// the innermost [`Ordered`].
+    Ordered,
     /// serde's one-member `{"variant":value}` wrapper for an externally
     /// tagged enum. It has one member, so nothing needs sorting and it
     /// streams; `filled` once its value starts.
@@ -220,6 +253,14 @@ pub struct Writer<'s, S: Sink + ?Sized> {
     staged: Vec<u8>,
     /// The output walk's task stack, kept between outermost objects.
     tasks: Vec<Task>,
+    /// Whether members arrive in canonical order and stream (see
+    /// [`Writer::in_order_with_reservation`]). Such a writer uses only
+    /// `stack`, `ordered` and `names`.
+    in_order: bool,
+    /// One record per [`Open::Ordered`] on `stack`, in the same order.
+    ordered: Vec<Ordered>,
+    /// The previous member name of each open in-order object, as UTF-8.
+    names: Vec<u8>,
     /// The caller's say over every growth of the lists above.
     provision: Provision<'s>,
     /// Whether the top-level value has started.
@@ -235,6 +276,7 @@ impl<S: Sink + ?Sized> fmt::Debug for Writer<'_, S> {
             .field("limits", &self.limits)
             .field("produced", &self.produced)
             .field("open", &self.stack.len())
+            .field("in_order", &self.in_order)
             .field("started", &self.started)
             .field("refused", &self.refused)
             .finish_non_exhaustive()
@@ -263,6 +305,75 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         Self::with_provision(sink, limits, Provision::new(reservation))
     }
 
+    /// A metered writer for a caller that pushes every object's members in
+    /// RFC 8785 order. Nothing is buffered for sorting and nothing is held
+    /// back: each canonical byte goes to `sink` as it is produced, so a
+    /// top-level object streams like a top-level array.
+    ///
+    /// [`Writer::name`] refuses [`Error::MemberOrder`] unless the name sorts
+    /// strictly after the previous name of the same object by UTF-16 code
+    /// unit (RFC 8785 §3.2.3), so an equal name is refused too; members are
+    /// never re-sorted. For every value whose members arrive in that order the
+    /// output is byte-for-byte that of [`Writer::with_reservation`], and the
+    /// same scalar and protocol refusals apply (see [`Error::MemberOrder`]
+    /// for the two differences in refusals).
+    ///
+    /// `reservation` is asked before every growth of the writer's heap, as
+    /// for [`Writer::with_reservation`]. That heap is the stack of open
+    /// containers, a record per open object and the previous member name of
+    /// each open object, so it is proportional to the depth of the value and
+    /// the length of its names, never to its length.
+    ///
+    /// On any refusal the sink holds the prefix of the canonical text
+    /// produced before it, which is not canonical output and must be
+    /// discarded: only [`Writer::finish`] returning `Ok(length)` certifies
+    /// that the sink received exactly the `length` bytes of one complete
+    /// value. The writer drops everything it holds at the refusal.
+    ///
+    /// ```
+    /// use quire_canonical::{
+    ///     Error, Limits, Reservation, ReservationDenied, Writer,
+    /// };
+    ///
+    /// struct Meter(usize);
+    /// impl Reservation for Meter {
+    ///     fn reserve(&mut self, bytes: usize) -> Result<(), ReservationDenied> {
+    ///         self.0 += bytes;
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// let mut bytes = Vec::new();
+    /// let mut meter = Meter(0);
+    /// let mut writer = Writer::in_order_with_reservation(&mut bytes, Limits::new(64), &mut meter);
+    /// writer.begin_object()?;
+    /// writer.name("a")?;
+    /// writer.string("ö")?;
+    /// writer.name("b")?;
+    /// writer.integer(1)?;
+    /// writer.end_object()?;
+    /// assert_eq!(writer.finish()?, 16);
+    /// assert_eq!(bytes, "{\"a\":\"ö\",\"b\":1}".as_bytes());
+    ///
+    /// // A name that does not sort after the previous one is refused.
+    /// let mut bytes = Vec::new();
+    /// let mut writer = Writer::in_order_with_reservation(&mut bytes, Limits::new(64), &mut meter);
+    /// writer.begin_object()?;
+    /// writer.name("b")?;
+    /// writer.null()?;
+    /// assert!(matches!(writer.name("a"), Err(Error::MemberOrder { depth: 0 })));
+    /// # Ok::<(), quire_canonical::Error>(())
+    /// ```
+    pub fn in_order_with_reservation(
+        sink: &'s mut S,
+        limits: Limits,
+        reservation: &'s mut dyn Reservation,
+    ) -> Self {
+        let mut writer = Self::with_provision(sink, limits, Provision::new(reservation));
+        writer.in_order = true;
+        writer
+    }
+
     fn with_provision(sink: &'s mut S, limits: Limits, provision: Provision<'s>) -> Self {
         Self {
             sink,
@@ -278,6 +389,9 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
             closed_children: Vec::new(),
             staged: Vec::new(),
             tasks: Vec::new(),
+            in_order: false,
+            ordered: Vec::new(),
+            names: Vec::new(),
             provision,
             started: false,
             refused: false,
@@ -392,7 +506,8 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         })
     }
 
-    /// Open an object. Its members may be pushed in any order.
+    /// Open an object. Its members may be pushed in any order, except on an
+    /// in-order writer, which takes them in canonical order.
     ///
     /// # Errors
     ///
@@ -401,6 +516,16 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         self.guard(|writer| {
             writer.before_value()?;
             writer.produce(b"{")?;
+            if writer.in_order {
+                writer.provision.grow(&mut writer.ordered, 1)?;
+                writer.push_open(Open::Ordered)?;
+                writer.ordered.push(Ordered {
+                    names: writer.names.len(),
+                    named: false,
+                    pending: false,
+                });
+                return Ok(());
+            }
             let start = buffer_offset(&writer.buffer)?;
             writer.provision.grow(&mut writer.frames, 1)?;
             writer.push_open(Open::Object)?;
@@ -422,17 +547,21 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     ///
     /// [`ProtocolViolation::NameOutsideObject`] outside an object,
     /// [`ProtocolViolation::NameWithoutValue`] when the previous name has no
-    /// value yet; otherwise as [`Writer::null`].
+    /// value yet, [`Error::MemberOrder`] on an in-order writer when `name`
+    /// does not sort strictly after the object's previous name; otherwise as
+    /// [`Writer::null`].
     pub fn name(&mut self, name: &str) -> Result<(), Error> {
         self.guard(|writer| writer.begin_member(name))
     }
 
     /// Close the innermost container, which must be an object: sort its
-    /// members and move them to their destination.
+    /// members and move them to their destination (on an in-order writer,
+    /// they are already there).
     ///
     /// # Errors
     ///
-    /// [`Error::DuplicateMemberName`] when two members share a name,
+    /// [`Error::DuplicateMemberName`] when two members share a name (never on
+    /// an in-order writer, which refused the second name),
     /// [`ProtocolViolation::MismatchedEnd`] when the innermost container is
     /// not an object, [`ProtocolViolation::ObjectEndedAfterName`] when the
     /// last name has no value; otherwise as [`Writer::null`].
@@ -510,6 +639,8 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         self.closed_children = Vec::new();
         self.staged = Vec::new();
         self.tasks = Vec::new();
+        self.ordered = Vec::new();
+        self.names = Vec::new();
     }
 
     /// Write one scalar value with `write`.
@@ -546,6 +677,12 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
                 }
                 Ok(())
             }
+            Open::Ordered => {
+                if !self.top_ordered()?.pending {
+                    return Err(Error::Protocol(ProtocolViolation::ValueWithoutName));
+                }
+                Ok(())
+            }
             Open::Wrapper { filled } => {
                 if *filled {
                     return Err(Error::Internal {
@@ -562,6 +699,10 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     fn after_value(&mut self) -> Result<(), Error> {
         match self.stack.last() {
             Some(Open::Object) => self.end_member(),
+            Some(Open::Ordered) => {
+                self.top_ordered()?.pending = false;
+                Ok(())
+            }
             Some(Open::Array { .. } | Open::Wrapper { .. }) | None => Ok(()),
         }
     }
@@ -592,10 +733,14 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     }
 
     /// Count new canonical bytes against the ceiling, then send them to the
-    /// sink, or to the buffer while an object is open.
+    /// sink, or to the buffer while an object is open. An in-order writer
+    /// opens no buffered object and holds no output, so its bytes go straight
+    /// to the sink.
     pub(crate) fn produce(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.count(bytes.len())?;
-        if self.frames.is_empty() {
+        if self.in_order {
+            self.sink.write_bytes(bytes)
+        } else if self.frames.is_empty() {
             emit(
                 &mut *self.sink,
                 &mut self.staged,
@@ -637,10 +782,18 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         })
     }
 
+    fn top_ordered(&mut self) -> Result<&mut Ordered, Error> {
+        self.ordered.last_mut().ok_or(Error::Internal {
+            invariant: "every open in-order object has a record",
+        })
+    }
+
     /// Write `"name":` as the start of a new member of the innermost object.
     pub(crate) fn begin_member(&mut self, name: &str) -> Result<(), Error> {
-        if !matches!(self.stack.last(), Some(Open::Object)) {
-            return Err(Error::Protocol(ProtocolViolation::NameOutsideObject));
+        match self.stack.last() {
+            Some(Open::Object) => {}
+            Some(Open::Ordered) => return self.begin_ordered_member(name),
+            _ => return Err(Error::Protocol(ProtocolViolation::NameOutsideObject)),
         }
         let offset = buffer_offset(&self.buffer)?;
         let frame = self.top_frame()?;
@@ -650,6 +803,49 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
         frame.pending = Some(offset);
         self.quoted(name)?;
         self.produce(b":")
+    }
+
+    /// Write `,"name":` (no comma for the first member) into the innermost
+    /// in-order object, after checking that `name` sorts strictly after the
+    /// object's previous member name, and keep `name` as the new previous one.
+    fn begin_ordered_member(&mut self, name: &str) -> Result<(), Error> {
+        let depth = self.stack.len().saturating_sub(1);
+        let frame = self.top_ordered()?;
+        if frame.pending {
+            return Err(Error::Protocol(ProtocolViolation::NameWithoutValue));
+        }
+        let (start, named) = (frame.names, frame.named);
+        if named {
+            let previous = self.names.get(start..).ok_or(Error::Internal {
+                invariant: "an open object's previous name lies inside the name list",
+            })?;
+            if cmp_names(previous, name.as_bytes()).is_ge() {
+                return Err(Error::MemberOrder { depth });
+            }
+            self.produce(b",")?;
+        }
+        self.names.truncate(start);
+        self.provision.grow(&mut self.names, name.len())?;
+        self.names.extend_from_slice(name.as_bytes());
+        let frame = self.top_ordered()?;
+        frame.named = true;
+        frame.pending = true;
+        self.quoted(name)?;
+        self.produce(b":")
+    }
+
+    /// Close the innermost in-order object, whose members are already out.
+    fn close_ordered(&mut self) -> Result<(), Error> {
+        if self.top_ordered()?.pending {
+            return Err(Error::Protocol(ProtocolViolation::ObjectEndedAfterName));
+        }
+        self.produce(b"}")?;
+        let frame = self.ordered.pop().ok_or(Error::Internal {
+            invariant: "every open in-order object has a record",
+        })?;
+        self.names.truncate(frame.names);
+        self.stack.pop();
+        self.after_value()
     }
 
     /// The member's value has been written; record the finished member.
@@ -665,8 +861,10 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     }
 
     pub(crate) fn close_object(&mut self) -> Result<(), Error> {
-        if !matches!(self.stack.last(), Some(Open::Object)) {
-            return Err(Error::Protocol(ProtocolViolation::MismatchedEnd));
+        match self.stack.last() {
+            Some(Open::Object) => {}
+            Some(Open::Ordered) => return self.close_ordered(),
+            _ => return Err(Error::Protocol(ProtocolViolation::MismatchedEnd)),
         }
         if self.top_frame()?.pending.is_some() {
             return Err(Error::Protocol(ProtocolViolation::ObjectEndedAfterName));

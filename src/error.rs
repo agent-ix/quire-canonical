@@ -145,6 +145,28 @@ pub enum Error {
         /// The repeated name.
         name: String,
     },
+    /// An in-order writer ([`crate::Writer::in_order_with_reservation`]) was
+    /// given a member name that does not sort strictly after the previous
+    /// member name of the same object by UTF-16 code unit (RFC 8785 §3.2.3):
+    /// the members are out of canonical order, or the name repeats.
+    ///
+    /// It takes the place of two refusals of the sorting writer: a repeated
+    /// name, which that writer refuses with [`Error::DuplicateMemberName`]
+    /// when the object closes, and an out-of-order name, which that writer
+    /// accepts and sorts. The in-order writer also counts each comma between
+    /// members against [`crate::Limits::max_bytes`] when it writes it, where
+    /// the sorting writer counts them all when the object closes. Both refuse
+    /// a value past the byte ceiling with [`Error::Limit`], but the
+    /// `required` amount can differ, and a value that also holds another
+    /// refusal can meet the ceiling first in one writer and the other
+    /// refusal first in the other. The in-order writer buffers nothing, so
+    /// it never refuses with [`LimitKind::ObjectBytes`].
+    #[error("member name out of canonical order in an object at depth {depth}")]
+    MemberOrder {
+        /// The number of containers enclosing the object: 0 for a top-level
+        /// object.
+        depth: usize,
+    },
     /// A `serde_json` private-token struct, emitted when `serde_json`'s
     /// `arbitrary_precision` or `raw_value` feature is on. Its fields do not
     /// describe the JSON value it stands for, so encoding them would produce
