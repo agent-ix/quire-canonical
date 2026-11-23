@@ -10,6 +10,8 @@ NO_STD_TARGET ?= thumbv7em-none-eabi
 .PHONY: help
 help:
 	@echo "Available targets:"
+	@echo "  make figures          - Regenerate docs/images from docs/images/figures.json (ixd-figures)"
+	@echo "  make figures-check    - Fail when docs/images are stale; writes nothing"
 	@echo "  make fmt              - Format with rustfmt"
 	@echo "  make fmt-check        - Verify formatting (CI gate)"
 	@echo "  make lint             - Clippy with -D warnings"
@@ -111,3 +113,19 @@ docs:
 
 .PHONY: ci
 ci: fmt-check lint test build-no-std deny docs
+
+# =============================================================================
+# Documentation figures
+# =============================================================================
+# docs/images/figures.json defines the figures; ixd-figures (agent-ix/ix-diagrams) renders them.
+# Install it with: cargo install --git https://github.com/agent-ix/ix-diagrams ixd-figures
+
+IXD_FIGURES ?= ixd-figures
+
+.PHONY: figures
+figures:
+	$(IXD_FIGURES) generate --definitions docs/images/figures.json
+
+.PHONY: figures-check
+figures-check:
+	$(IXD_FIGURES) check --definitions docs/images/figures.json

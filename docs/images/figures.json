@@ -1,0 +1,55 @@
+{
+  "data": {
+    "canonical": {"from":"text","value":"{\"a\":1,\"b\":2.5}"},
+    "digest": {"from":"sha256","of":"canonical","head":8,"tail":7}
+  },
+  "figures": [
+    {
+      "id": "hero",
+      "width": 980, "height": 250,
+      "label": "Two JSON texts that differ in key order and number spelling, {{\"b\": 2.50, \"a\": 1.0}} and {{\"a\": 1, \"b\": 2.5e0}}, are both read and encoded to the same canonical bytes, {{\"a\":1,\"b\":2.5}}, and so to the same SHA-256 digest.",
+      "items": [
+        {"k":"box","at":[0,30,230,56],"role":"ink","title":"JSON text","subs":["{{\"b\": 2.50, \"a\": 1.0}}"]},
+        {"k":"box","at":[0,130,230,56],"role":"ink","title":"same value, other spelling","subs":["{{\"a\": 1, \"b\": 2.5e0}}"]},
+        {"k":"box","at":[300,80,170,56],"role":"logic","title":"quire-canonical","subs":["sort · number text"]},
+        {"k":"box","at":[540,80,190,56],"role":"model","title":"canonical bytes","subs":["{canonical}"]},
+        {"k":"box","at":[800,80,180,56],"role":"evidence","title":"SHA-256","subs":["{digest}"]},
+        {"k":"line","points":[[230,58],[265,58],[265,100],[297,100]]},
+        {"k":"line","points":[[230,158],[265,158],[265,116],[297,116]]},
+        {"k":"line","points":[[470,108],[537,108]],"role":"logic"},
+        {"k":"line","points":[[730,108],[797,108]],"role":"model"},
+        {"k":"note","at":[332,168],"text":"RFC 8785","role":"muted"},
+        {"k":"legend","at":[0,244],"entries":[["ink","input","box"],["logic","encoder","box"],["model","canonical text","box"],["evidence","digest","box"]]}
+      ]
+    },
+    {
+      "id": "pipeline",
+      "width": 980, "height": 330,
+      "label": "A value reaches the Writer as pushed events, as a Document from read, as a serde_json::Value or through serde for a FixedShape type. The Writer emits canonical bytes in order into a Sink: a SHA-256 hasher, a byte vector or an io::Write.",
+      "items": [
+        {"k":"box","at":[0,0,210,56],"role":"ink","title":"pushed events","subs":["your own stack"]},
+        {"k":"box","at":[0,80,210,56],"role":"ink","title":"Document","subs":["from read(bytes)"]},
+        {"k":"box","at":[0,160,210,56],"role":"ink","title":"serde_json::Value","subs":["feature serde_json"]},
+        {"k":"box","at":[0,240,210,56],"role":"ink","title":"FixedShape type","subs":["serde, fixed depth"]},
+        {"k":"box","at":[330,120,170,56],"role":"logic","title":"Writer","subs":["events in order"]},
+        {"k":"line","points":[[210,28],[270,28],[270,148],[327,148]]},
+        {"k":"line","points":[[210,108],[270,108],[270,148],[327,148]]},
+        {"k":"line","points":[[210,188],[270,188],[270,148],[327,148]]},
+        {"k":"line","points":[[210,268],[270,268],[270,148],[327,148]]},
+        {"k":"box","at":[580,120,150,56],"role":"model","title":"canonical bytes","subs":["no whole String"]},
+        {"k":"line","points":[[500,148],[577,148]],"role":"logic"},
+        {"k":"line","points":[[730,148],[760,148]],"role":"model","arrow":false},
+        {"k":"line","points":[[760,58],[760,238]],"role":"model","arrow":false},
+        {"k":"line","points":[[760,58],[797,58]],"role":"model"},
+        {"k":"box","at":[800,30,180,56],"role":"evidence","title":"SHA-256 hasher","subs":["digest"]},
+        {"k":"line","points":[[760,148],[797,148]],"role":"model"},
+        {"k":"box","at":[800,120,180,56],"role":"evidence","title":"Vec<u8>","subs":["to_vec"]},
+        {"k":"line","points":[[760,238],[797,238]],"role":"model"},
+        {"k":"box","at":[800,210,180,56],"role":"evidence","title":"io::Write","subs":["WriteSink · std"]},
+        {"k":"legend","at":[0,324],"entries":[["ink","input","box"],["logic","encoder","box"],["model","canonical text","box"],["evidence","sink","box"]]}
+      ]
+    },
+    {"id":"ecosystem","construct":{"name":"ecosystem","here":"quire-canonical"}}
+  ]
+}
+
