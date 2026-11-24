@@ -164,9 +164,10 @@ fn reservation_refusal_from_spliced_bytes_refuses_writer() {
         writer.canonical_value(&value),
         Err(Error::ReservationDenied { .. })
     ));
-    assert!(sink.is_empty(), "metered writer keeps output until finish");
     assert!(matches!(
         writer.null(),
         Err(Error::Protocol(ProtocolViolation::AfterRefusal))
     ));
+    drop(writer);
+    assert!(sink.is_empty(), "metered writer keeps output until finish");
 }
