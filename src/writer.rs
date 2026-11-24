@@ -109,7 +109,8 @@ use crate::number::{exact_integer_double, with_double_text};
 use crate::order::{cmp_member_names, cmp_names, Unescaped};
 use crate::reservation::Provision;
 use crate::{
-    Error, FixedShape, LimitExceeded, LimitKind, Limits, ProtocolViolation, Reservation, Sink,
+    CanonicalValue, Error, FixedShape, LimitExceeded, LimitKind, Limits, ProtocolViolation,
+    Reservation, Sink,
 };
 
 /// Where one member's canonical bytes (`"name":value`) were written in the
@@ -473,6 +474,25 @@ impl<'s, S: Sink + ?Sized> Writer<'s, S> {
     /// As [`Writer::null`].
     pub fn string(&mut self, value: &str) -> Result<(), Error> {
         self.guard(|writer| writer.scalar(|writer| writer.quoted(value)))
+    }
+
+    /// Embed an already validated complete canonical value without encoding
+    /// it again.
+    ///
+    /// The value is treated as one event at the current position. Its bytes
+    /// count against this writer's combined canonical byte limit and follow
+    /// the same buffering, reservation, sink, and refusal behavior as other
+    /// produced bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::null`].
+    pub fn canonical_value(&mut self, value: &CanonicalValue) -> Result<(), Error> {
+        self.guard(|writer| {
+            writer.before_value()?;
+            writer.produce(value.as_bytes())?;
+            writer.after_value()
+        })
     }
 
     /// Open an array.

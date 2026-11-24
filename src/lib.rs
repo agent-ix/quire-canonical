@@ -98,6 +98,7 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+mod canonical_value;
 mod encoder;
 mod error;
 mod escape;
@@ -119,6 +120,7 @@ use serde::{Deserialize, Serialize};
 
 use sha2::{Digest as _, Sha256};
 
+pub use crate::canonical_value::{CanonicalValue, CanonicalValueError};
 pub use crate::error::{Error, LimitExceeded, LimitKind, ProtocolViolation};
 pub use crate::identity::{
     AuthorityDigest, AuthorityIdentity, AuthorityQualifiedSubjectReference, DigestDomain,
