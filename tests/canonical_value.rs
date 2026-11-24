@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Agent-IX
 
 use quire_canonical::{
-    CanonicalValue, CanonicalValueError, Error, Limits, ProtocolViolation, Sink, Writer,
+    CanonicalValue, CanonicalValueError, Error, Limits, ProtocolViolation, Reservation,
+    ReservationDenied, Sink, Writer,
 };
 
 #[test]
@@ -46,6 +47,10 @@ fn embeds_values_at_top_level_and_inside_arrays_and_objects() {
     let mut bytes = Vec::new();
     let mut writer = Writer::new(&mut bytes, Limits::new(64));
     writer.begin_object().expect("begin object");
+    writer.name("direct").expect("member name");
+    writer
+        .canonical_value(&nested)
+        .expect("write object member value");
     writer.name("items").expect("member name");
     writer.begin_array().expect("begin array");
     writer.canonical_value(&nested).expect("write nested value");
@@ -53,7 +58,10 @@ fn embeds_values_at_top_level_and_inside_arrays_and_objects() {
     writer.end_array().expect("end array");
     writer.end_object().expect("end object");
     writer.finish().expect("complete value");
-    assert_eq!(bytes, br#"{"items":[{"z":false},null]}"#);
+    assert_eq!(
+        bytes,
+        br#"{"direct":{"z":false},"items":[{"z":false},null]}"#
+    );
 }
 
 #[test]
@@ -133,6 +141,30 @@ fn sink_failure_from_spliced_bytes_refuses_writer() {
             invariant: "test sink refusal"
         })
     ));
+    assert!(matches!(
+        writer.null(),
+        Err(Error::Protocol(ProtocolViolation::AfterRefusal))
+    ));
+}
+
+#[test]
+fn reservation_refusal_from_spliced_bytes_refuses_writer() {
+    struct Refuse;
+    impl Reservation for Refuse {
+        fn reserve(&mut self, _bytes: usize) -> Result<(), ReservationDenied> {
+            Err(ReservationDenied)
+        }
+    }
+
+    let value = CanonicalValue::new(b"null", 16).expect("canonical value");
+    let mut sink = Vec::new();
+    let mut reservation = Refuse;
+    let mut writer = Writer::with_reservation(&mut sink, Limits::new(16), &mut reservation);
+    assert!(matches!(
+        writer.canonical_value(&value),
+        Err(Error::ReservationDenied { .. })
+    ));
+    assert!(sink.is_empty(), "metered writer keeps output until finish");
     assert!(matches!(
         writer.null(),
         Err(Error::Protocol(ProtocolViolation::AfterRefusal))
