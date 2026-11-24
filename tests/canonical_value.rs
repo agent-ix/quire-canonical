@@ -26,7 +26,7 @@ fn construction_requires_one_complete_canonical_value() {
         CanonicalValue::new(br#"{"b":1,"a":2}"#, 64),
         Err(CanonicalValueError::NotCanonical)
     ));
-    assert!(matches!(CanonicalValue::new(b"null", 3), Ok(_)));
+    assert!(CanonicalValue::new(b"null", 3).is_ok());
     assert!(matches!(
         CanonicalValue::new(b"null", 2),
         Err(CanonicalValueError::Read(_))
