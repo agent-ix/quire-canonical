@@ -71,8 +71,10 @@
 //! * two members of one object with the same name (RFC 8785 requires I-JSON);
 //! * every other departure from the RFC 8259 grammar.
 //!
-//! A number keeps its source text next to its double value: RFC 8785 encodes
-//! the double, while a typed reader may need an integer exactly as written.
+//! A number keeps its source text after validating that it has a finite double.
+//! RFC 8785 encodes that double, while a typed reader may need an integer
+//! exactly as written; the same validated lexeme supplies the double when a
+//! caller exposes or encodes the number.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -200,22 +202,107 @@ struct Range {
     end: usize,
 }
 
-/// One node of the arena.
+/// One arena node's range and compact, explicit kind tag.
+///
+/// Numbers keep their lexeme range and are converted to `f64` when exposed or
+/// encoded. Keeping the tag separate from the range avoids the enum padding
+/// that otherwise raises every slot to 32 bytes.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Slot {
+struct Slot {
+    range: Range,
+    tag: SlotTag,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<Slot>() == 24);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum SlotTag {
+    Null,
+    False,
+    True,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SlotKind {
     Null,
     Bool(bool),
-    /// The literal's source text in `text`, and its double.
-    Number {
-        text: Range,
-        value: f64,
-    },
-    /// The decoded string in `text`.
+    Number { text: Range, value: f64 },
     String(Range),
-    /// Child ids in `items`.
     Array(Range),
-    /// `(name, value)` pairs in `members`, in document order.
     Object(Range),
+}
+
+impl Slot {
+    const fn null() -> Self {
+        Self {
+            range: Range { start: 0, end: 0 },
+            tag: SlotTag::Null,
+        }
+    }
+
+    const fn boolean(value: bool) -> Self {
+        let tag = if value { SlotTag::True } else { SlotTag::False };
+        Self {
+            range: Range { start: 0, end: 0 },
+            tag,
+        }
+    }
+
+    const fn number(text: Range) -> Self {
+        Self {
+            range: text,
+            tag: SlotTag::Number,
+        }
+    }
+
+    const fn string(text: Range) -> Self {
+        Self {
+            range: text,
+            tag: SlotTag::String,
+        }
+    }
+
+    const fn array(children: Range) -> Self {
+        Self {
+            range: children,
+            tag: SlotTag::Array,
+        }
+    }
+
+    const fn object(members: Range) -> Self {
+        Self {
+            range: members,
+            tag: SlotTag::Object,
+        }
+    }
+
+    fn kind(self, document: &Document) -> SlotKind {
+        match self.tag {
+            SlotTag::Null => SlotKind::Null,
+            SlotTag::False => SlotKind::Bool(false),
+            SlotTag::True => SlotKind::Bool(true),
+            SlotTag::Number => SlotKind::Number {
+                text: self.range,
+                value: validated_number_value(document.text_of(self.range)),
+            },
+            SlotTag::String => SlotKind::String(self.range),
+            SlotTag::Array => SlotKind::Array(self.range),
+            SlotTag::Object => SlotKind::Object(self.range),
+        }
+    }
+}
+
+fn validated_number_value(text: &str) -> f64 {
+    // The parser validates this exact lexeme as a finite f64 before creating
+    // its Number slot, and the document's text is immutable afterwards.
+    text.parse::<f64>()
+        .expect("a stored number lexeme was validated by the parser")
 }
 
 /// A JSON document read by [`read`]: an arena tree of its values.
@@ -415,7 +502,7 @@ impl Document {
     }
 
     fn slot(&self, id: usize) -> Slot {
-        self.slots.get(id).copied().unwrap_or(Slot::Null)
+        self.slots.get(id).copied().unwrap_or_else(Slot::null)
     }
 }
 
@@ -430,15 +517,15 @@ impl<'d> NodeRef<'d> {
     #[must_use]
     pub fn node(&self) -> Node<'d> {
         let document = self.document;
-        match document.slot(self.id) {
-            Slot::Null => Node::Null,
-            Slot::Bool(value) => Node::Bool(value),
-            Slot::Number { text, value } => Node::Number(Number {
+        match document.slot(self.id).kind(document) {
+            SlotKind::Null => Node::Null,
+            SlotKind::Bool(value) => Node::Bool(value),
+            SlotKind::Number { text, value } => Node::Number(Number {
                 text: document.text_of(text),
                 value,
             }),
-            Slot::String(text) => Node::String(document.text_of(text)),
-            Slot::Array(range) => Node::Array(Items {
+            SlotKind::String(text) => Node::String(document.text_of(text)),
+            SlotKind::Array(range) => Node::Array(Items {
                 document,
                 ids: document
                     .items
@@ -446,7 +533,7 @@ impl<'d> NodeRef<'d> {
                     .unwrap_or_default()
                     .iter(),
             }),
-            Slot::Object(range) => Node::Object(Members {
+            SlotKind::Object(range) => Node::Object(Members {
                 document,
                 pairs: document
                     .members
@@ -493,12 +580,12 @@ impl Encode for NodeRef<'_> {
         tasks.push(Task::Value(self.id));
         while let Some(task) = tasks.pop() {
             match task {
-                Task::Value(id) => match document.slot(id) {
-                    Slot::Null => writer.null()?,
-                    Slot::Bool(value) => writer.bool(value)?,
-                    Slot::Number { value, .. } => writer.number(value)?,
-                    Slot::String(text) => writer.string(document.text_of(text))?,
-                    Slot::Array(range) => {
+                Task::Value(id) => match document.slot(id).kind(document) {
+                    SlotKind::Null => writer.null()?,
+                    SlotKind::Bool(value) => writer.bool(value)?,
+                    SlotKind::Number { value, .. } => writer.number(value)?,
+                    SlotKind::String(text) => writer.string(document.text_of(text))?,
+                    SlotKind::Array(range) => {
                         writer.begin_array()?;
                         let ids = document
                             .items
@@ -508,7 +595,7 @@ impl Encode for NodeRef<'_> {
                         tasks.push(Task::EndArray);
                         tasks.extend(ids.iter().rev().map(|id| Task::Value(*id)));
                     }
-                    Slot::Object(range) => {
+                    SlotKind::Object(range) => {
                         writer.begin_object()?;
                         let pairs = document
                             .members
@@ -577,21 +664,21 @@ pub fn read_with_reservation(
 /// grows as in [`read_with_reservation`] (doubling from four entries of 16
 /// bytes) to the deepest nesting `D` and is reused by pass 2. Pass 2 asks
 /// `reservation` once per list, before that list's one allocation, in the
-/// order text (`T` bytes), nodes (`32·V`), child ids (`8·I`), members
+/// order text (`T` bytes), nodes (`24·V`), child ids (`8·I`), members
 /// (`24·M`), open-array children (`8·Hi`), open-object members (`32·Hm`)
 /// and sort buffer (`8·Ho`), skipping an empty list; then it fills them with
 /// the same grammar, and no list grows again. For an accepted input the
 /// bytes asked are therefore
 ///
 /// ```text
-/// S(D) + T + 32·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+/// S(D) + T + 24·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
 /// ```
 ///
 /// where `S(D)` is the stack's growth (`16·(4 + 8 + … + c)` for the first
 /// doubling `c ≥ D`, zero when `D = 0`), a function of the document alone
 /// and less than [`read_with_reservation`] asks for the same input. The
 /// document's [`Document::retained_bytes`] is exactly
-/// `T + 32·V + 8·I + 24·M`. (The sizes are those of a 64-bit target.)
+/// `T + 24·V + 8·I + 24·M`. (The sizes are those of a 64-bit target.)
 ///
 /// The document, and every refusal with its offset, pointer and lexeme, are
 /// those of [`read_with_reservation`] whenever `reservation` admits every
@@ -627,8 +714,8 @@ pub fn read_with_reservation(
 /// assert_eq!(document, read(input, 1024)?);
 /// // Stack (4 entries), then text "a12bx" (5), 5 nodes, 2 child ids,
 /// // 2 members, 2 open-array children, 2 open-object members, sort buffer 2.
-/// assert_eq!(meter.0, [64, 5, 5 * 32, 2 * 8, 2 * 24, 2 * 8, 2 * 32, 2 * 8]);
-/// assert_eq!(document.retained_bytes(), 5 + 5 * 32 + 2 * 8 + 2 * 24);
+/// assert_eq!(meter.0, [64, 5, 5 * 24, 2 * 8, 2 * 24, 2 * 8, 2 * 32, 2 * 8]);
+/// assert_eq!(document.retained_bytes(), 5 + 5 * 24 + 2 * 8 + 2 * 24);
 /// # Ok::<(), quire_canonical::ReadError>(())
 /// ```
 ///
@@ -1147,7 +1234,7 @@ impl Builder for Build {
             self.members
                 .extend(pending.iter().map(|member| (member.name, member.id)));
             self.scratch_members.truncate(open.start);
-            Slot::Object(Range {
+            Slot::object(Range {
                 start,
                 end: self.members.len(),
             })
@@ -1159,7 +1246,7 @@ impl Builder for Build {
                 .map_err(ReadError::from)?;
             self.items.extend_from_slice(items);
             self.scratch_items.truncate(open.start);
-            Slot::Array(Range {
+            Slot::array(Range {
                 start,
                 end: self.items.len(),
             })
@@ -1272,7 +1359,7 @@ impl Builder for Count {
             let start = self.members;
             self.members = self.members.saturating_add(width);
             self.scratch_members = open.start;
-            Slot::Object(Range {
+            Slot::object(Range {
                 start,
                 end: self.members,
             })
@@ -1281,7 +1368,7 @@ impl Builder for Count {
             let start = self.items;
             self.items = self.items.saturating_add(width);
             self.scratch_items = open.start;
-            Slot::Array(Range {
+            Slot::array(Range {
                 start,
                 end: self.items,
             })
@@ -1446,10 +1533,10 @@ impl<'i, 'r, B: Builder> Parser<'i, 'r, B> {
                     Expect::ValueOrEnd
                 });
             }
-            b'"' => Slot::String(self.string()?),
-            b't' => self.literal("true", Slot::Bool(true))?,
-            b'f' => self.literal("false", Slot::Bool(false))?,
-            b'n' => self.literal("null", Slot::Null)?,
+            b'"' => Slot::string(self.string()?),
+            b't' => self.literal("true", Slot::boolean(true))?,
+            b'f' => self.literal("false", Slot::boolean(false))?,
+            b'n' => self.literal("null", Slot::null())?,
             b'-' | b'0'..=b'9' => self.number()?,
             _ => return Err(self.malformed(start, Malformed::UnexpectedCharacter)),
         };
@@ -1664,13 +1751,10 @@ impl<'i, 'r, B: Builder> Parser<'i, 'r, B> {
         }
         let text_start = self.builder.text_len();
         self.append(literal)?;
-        Ok(Slot::Number {
-            text: Range {
-                start: text_start,
-                end: self.builder.text_len(),
-            },
-            value,
-        })
+        Ok(Slot::number(Range {
+            start: text_start,
+            end: self.builder.text_len(),
+        }))
     }
 
     fn digits(&mut self) {

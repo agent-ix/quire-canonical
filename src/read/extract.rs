@@ -13,7 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{Document, NodeId, Range, Slot};
+use super::{Document, NodeId, Range, Slot, SlotKind};
 use crate::reservation::{Provision, Refusal};
 use crate::Reservation;
 
@@ -91,11 +91,11 @@ impl Span {
     fn of(document: &Document, root: usize) -> Option<Self> {
         let mut first = root;
         loop {
-            let child = match document.slots.get(first)? {
-                Slot::Array(range) if range.start < range.end => {
+            let child = match document.slots.get(first)?.kind(document) {
+                SlotKind::Array(range) if range.start < range.end => {
                     *document.items.get(range.start)?
                 }
-                Slot::Object(range) if range.start < range.end => {
+                SlotKind::Object(range) if range.start < range.end => {
                     document.members.get(range.start)?.1
                 }
                 _ => break,
@@ -112,12 +112,12 @@ impl Span {
         let mut edges = 0_usize;
         for id in first..=root {
             let inside = |child: usize| (first..id).contains(&child);
-            match *document.slots.get(id)? {
-                Slot::Null | Slot::Bool(_) => {}
-                Slot::Number { text, .. } | Slot::String(text) => {
+            match document.slots.get(id)?.kind(document) {
+                SlotKind::Null | SlotKind::Bool(_) => {}
+                SlotKind::Number { text, .. } | SlotKind::String(text) => {
                     totals.text = totals.text.checked_add(text.end - text.start)?;
                 }
-                Slot::Array(range) => {
+                SlotKind::Array(range) => {
                     let ids = document.items.get(range.start..range.end)?;
                     if !ids.iter().all(|child| inside(*child)) {
                         return None;
@@ -125,7 +125,7 @@ impl Span {
                     totals.items = totals.items.checked_add(ids.len())?;
                     edges = edges.checked_add(ids.len())?;
                 }
-                Slot::Object(range) => {
+                SlotKind::Object(range) => {
                     let pairs = document.members.get(range.start..range.end)?;
                     for (name, child) in pairs {
                         if !inside(*child) {
@@ -174,7 +174,7 @@ impl Document {
     /// names), values, array elements and object members of the copied
     /// subtrees summed over `roots`, and `k = roots.len()`, the lists hold
     /// `T` bytes, `S + 1` values, `I + k` elements, `M` members and `k` ids.
-    /// On a 64-bit target that is `T + 32(S + 1) + 8(I + k) + 24M + 8k`
+    /// On a 64-bit target that is `T + 24(S + 1) + 8(I + k) + 24M + 8k`
     /// bytes in all, and the returned document's
     /// [`Document::retained_bytes`] is the first four terms. Nothing depends
     /// on the parts of `self` outside `roots`.
@@ -205,9 +205,9 @@ impl Document {
     /// assert_eq!(to_vec(&payload, Limits::new(1024)).expect("encodes"), br#"[{"a":"x"}]"#);
     /// // Text "a" and "x"; 3 values; 1 element; 1 member; 1 id.
     /// # #[cfg(target_pointer_width = "64")]
-    /// assert_eq!(charged.0, 2 + 32 * 3 + 8 + 24 + 8);
+    /// assert_eq!(charged.0, 2 + 24 * 3 + 8 + 24 + 8);
     /// # #[cfg(target_pointer_width = "64")]
-    /// assert_eq!(payload.retained_bytes(), 2 + 32 * 3 + 8 + 24);
+    /// assert_eq!(payload.retained_bytes(), 2 + 24 * 3 + 8 + 24);
     /// # Ok::<(), quire_canonical::ExtractError>(())
     /// ```
     ///
@@ -266,34 +266,36 @@ impl Document {
             let base = slots.len();
             let remap = |id: usize| id - span.first + base;
             for id in span.first..=span.root {
-                let slot = match self.slot(id) {
-                    Slot::Number { text: range, value } => Slot::Number {
-                        text: copy_text(&mut text, self.text_of(range)),
-                        value,
-                    },
-                    Slot::String(range) => Slot::String(copy_text(&mut text, self.text_of(range))),
-                    Slot::Array(range) => {
+                let slot = match self.slot(id).kind(self) {
+                    SlotKind::Number { text: range, .. } => {
+                        Slot::number(copy_text(&mut text, self.text_of(range)))
+                    }
+                    SlotKind::String(range) => {
+                        Slot::string(copy_text(&mut text, self.text_of(range)))
+                    }
+                    SlotKind::Array(range) => {
                         let start = items.len();
                         let children = self.items.get(range.start..range.end).unwrap_or_default();
                         items.extend(children.iter().map(|child| remap(*child)));
-                        Slot::Array(Range {
+                        Slot::array(Range {
                             start,
                             end: items.len(),
                         })
                     }
-                    Slot::Object(range) => {
+                    SlotKind::Object(range) => {
                         let start = members.len();
                         let pairs = self.members.get(range.start..range.end).unwrap_or_default();
                         for (name, child) in pairs {
                             let name = copy_text(&mut text, self.text_of(*name));
                             members.push((name, remap(*child)));
                         }
-                        Slot::Object(Range {
+                        Slot::object(Range {
                             start,
                             end: members.len(),
                         })
                     }
-                    scalar @ (Slot::Null | Slot::Bool(_)) => scalar,
+                    SlotKind::Null => Slot::null(),
+                    SlotKind::Bool(value) => Slot::boolean(value),
                 };
                 slots.push(slot);
             }
@@ -302,7 +304,7 @@ impl Document {
         let start = items.len();
         items.extend(ids.iter().map(|id| id.0));
         let root = slots.len();
-        slots.push(Slot::Array(Range {
+        slots.push(Slot::array(Range {
             start,
             end: items.len(),
         }));
