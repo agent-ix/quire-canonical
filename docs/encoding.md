@@ -141,13 +141,13 @@ lists, and none of them grows again. For an accepted input the bytes asked
 are
 
 ```text
-S(D) + T + 32·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+S(D) + T + 24·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
 ```
 
 `S(D)` is the stack's growth to the deepest nesting `D`, and the sizes are
 those of a 64-bit target. The total is always below what
 `read_with_reservation` asks for the same input. `Document::retained_bytes`
-is exactly `T + 32·V + 8·I + 24·M`. For a root object of small records, the
+is exactly `T + 24·V + 8·I + 24·M`. For a root object of small records, the
 growing reader asks 18x to 22x the input at 1k to 100k members, against
 about 7.3x here, and retains 8.4x to 10.3x, against 6.4x to 6.7x here.
 
@@ -180,7 +180,7 @@ second pass asks the reservation once per list, in the order text, values,
 elements, members, returned ids, each for its exact final capacity and before
 its only allocation; a list of zero bytes is not asked for. With `T` decoded
 text bytes, `S` values, `I` array elements and `M` members summed over the
-copied subtrees, and `k` roots, that is `T + 32(S + 1) + 8(I + k) + 24M + 8k`
+copied subtrees, and `k` roots, that is `T + 24(S + 1) + 8(I + k) + 24M + 8k`
 bytes on a 64-bit target, of which the document retains all but the `8k` of
 returned ids. The size depends on the selected subtrees only.
 
