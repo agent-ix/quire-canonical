@@ -14,8 +14,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::{
-    Document, IndexWidth, MemberVec, NodeId, Range, RangeVec, Slot, SlotKind, SlotTag,
-    IndexVec,
+    Document, IndexVec, IndexWidth, MemberVec, NodeId, Range, RangeVec, ReadError, Slot, SlotKind,
+    SlotTag,
 };
 use crate::reservation::{Provision, Refusal};
 use crate::Reservation;
@@ -262,19 +262,20 @@ impl Document {
                     requested: sum.text,
                 })?;
         }
-        let width = IndexWidth::for_dimensions(&[
-            sum.text,
-            sum.slots,
-            sum.items,
-            sum.members,
-        ]);
+        let width = IndexWidth::for_dimensions(&[sum.text, sum.slots, sum.items, sum.members]);
         let mut ranges = RangeVec::new(width);
-        ranges.reserve_exact(&mut provision, sum.slots)?;
+        ranges
+            .reserve_exact(&mut provision, sum.slots)
+            .map_err(extract_read_error)?;
         let mut tags: Vec<SlotTag> = exact(&mut provision, sum.slots)?;
         let mut items = IndexVec::new(width);
-        items.reserve_exact(&mut provision, sum.items)?;
+        items
+            .reserve_exact(&mut provision, sum.items)
+            .map_err(extract_read_error)?;
         let mut members = MemberVec::new(width);
-        members.reserve_exact(&mut provision, sum.members)?;
+        members
+            .reserve_exact(&mut provision, sum.members)
+            .map_err(extract_read_error)?;
         let mut ids: Vec<NodeId> = exact(&mut provision, count)?;
 
         for root in roots {
@@ -292,9 +293,7 @@ impl Document {
                     }
                     SlotKind::Array(range) => {
                         let start = items.len();
-                        let children = self
-                            .item_ids(range)
-                            .unwrap_or_else(super::IndexIter::empty);
+                        let children = self.item_ids(range).unwrap_or_else(super::IndexIter::empty);
                         for child in children {
                             items
                                 .push_reserved(remap(child))
@@ -314,11 +313,11 @@ impl Document {
                             .unwrap_or_else(super::MemberIter::empty);
                         for (name, child) in pairs {
                             let name = copy_text(&mut text, self.text_of(name));
-                            members
-                                .push_reserved(name, remap(child))
-                                .ok_or(ExtractError::Allocation {
+                            members.push_reserved(name, remap(child)).ok_or(
+                                ExtractError::Allocation {
                                     requested: usize::MAX,
-                                })?;
+                                },
+                            )?;
                         }
                         Slot::object(Range {
                             start,
@@ -328,20 +327,20 @@ impl Document {
                     SlotKind::Null => Slot::null(),
                     SlotKind::Bool(value) => Slot::boolean(value),
                 };
-                ranges.push_reserved(slot.range).ok_or(ExtractError::Allocation {
-                    requested: usize::MAX,
-                })?;
+                ranges
+                    .push_reserved(slot.range)
+                    .ok_or(ExtractError::Allocation {
+                        requested: usize::MAX,
+                    })?;
                 tags.push(slot.tag);
             }
             ids.push(NodeId(remap(span.root)));
         }
         let start = items.len();
         for id in &ids {
-            items
-                .push_reserved(id.0)
-                .ok_or(ExtractError::Allocation {
-                    requested: usize::MAX,
-                })?;
+            items.push_reserved(id.0).ok_or(ExtractError::Allocation {
+                requested: usize::MAX,
+            })?;
         }
         let root = ranges.len();
         let root_slot = Slot::array(Range {
@@ -365,6 +364,16 @@ impl Document {
             },
             ids,
         ))
+    }
+}
+
+fn extract_read_error(error: ReadError) -> ExtractError {
+    match error {
+        ReadError::ReservationDenied { requested } => ExtractError::ReservationDenied { requested },
+        ReadError::Allocation { requested } => ExtractError::Allocation { requested },
+        _ => ExtractError::Allocation {
+            requested: usize::MAX,
+        },
     }
 }
 

@@ -393,11 +393,7 @@ impl RangeVec {
         }
     }
 
-    fn grow_push(
-        &mut self,
-        provision: &mut Provision<'_>,
-        range: Range,
-    ) -> Result<(), ReadError> {
+    fn grow_push(&mut self, provision: &mut Provision<'_>, range: Range) -> Result<(), ReadError> {
         match self {
             Self::Bits32(values) => {
                 let range = Range32::encode(range).ok_or_else(index_allocation_error)?;
@@ -505,11 +501,7 @@ impl IndexVec {
         .map_err(ReadError::from)
     }
 
-    fn grow_push(
-        &mut self,
-        provision: &mut Provision<'_>,
-        id: usize,
-    ) -> Result<(), ReadError> {
+    fn grow_push(&mut self, provision: &mut Provision<'_>, id: usize) -> Result<(), ReadError> {
         match self {
             Self::Bits32(values) => {
                 let id = u32::try_from(id).map_err(|_| index_allocation_error())?;
@@ -531,7 +523,9 @@ impl IndexVec {
 
     fn push_reserved(&mut self, id: usize) -> Option<()> {
         match self {
-            Self::Bits32(values) => values.push(u32::try_from(id).ok().?),
+            Self::Bits32(values) => {
+                values.push(u32::try_from(id).ok()?);
+            }
             Self::Bits40(values) => values.push(Packed40::encode(id)?),
             Self::Native(values) => values.push(id),
         }
@@ -689,7 +683,9 @@ impl DoubleEndedIterator for IndexIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
             Self::Empty(values) => values.next_back(),
-            Self::Bits32(values) => values.next_back().and_then(|value| usize::try_from(*value).ok()),
+            Self::Bits32(values) => values
+                .next_back()
+                .and_then(|value| usize::try_from(*value).ok()),
             Self::Bits40(values) => values.next_back().and_then(|value| value.decode()),
             Self::Native(values) => values.next_back().copied(),
         }
@@ -718,9 +714,9 @@ impl Iterator for MemberIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Empty(values) => values.next(),
-            Self::Bits32(values) => values.next().and_then(|member| {
-                Some((member.name.decode()?, usize::try_from(member.id).ok()?))
-            }),
+            Self::Bits32(values) => values
+                .next()
+                .and_then(|member| Some((member.name.decode()?, usize::try_from(member.id).ok()?))),
             Self::Bits40(values) => values
                 .next()
                 .and_then(|member| Some((member.name.decode()?, member.id.decode()?))),
@@ -743,9 +739,9 @@ impl DoubleEndedIterator for MemberIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
             Self::Empty(values) => values.next_back(),
-            Self::Bits32(values) => values.next_back().and_then(|member| {
-                Some((member.name.decode()?, usize::try_from(member.id).ok()?))
-            }),
+            Self::Bits32(values) => values
+                .next_back()
+                .and_then(|member| Some((member.name.decode()?, usize::try_from(member.id).ok()?))),
             Self::Bits40(values) => values
                 .next_back()
                 .and_then(|member| Some((member.name.decode()?, member.id.decode()?))),
@@ -952,7 +948,7 @@ impl<'d> Iterator for Items<'d> {
     type Item = NodeRef<'d>;
 
     fn next(&mut self) -> Option<NodeRef<'d>> {
-        let id = *self.ids.next()?;
+        let id = self.ids.next()?;
         Some(NodeRef {
             document: self.document,
             id,
@@ -986,7 +982,7 @@ impl<'d> Iterator for Members<'d> {
     type Item = (&'d str, NodeRef<'d>);
 
     fn next(&mut self) -> Option<(&'d str, NodeRef<'d>)> {
-        let (name, id) = *self.pairs.next()?;
+        let (name, id) = self.pairs.next()?;
         Some((
             self.document.text_of(name),
             NodeRef {
@@ -1090,7 +1086,9 @@ impl<'d> NodeRef<'d> {
             }),
             SlotKind::Object(range) => Node::Object(Members {
                 document,
-                pairs: document.member_pairs(range).unwrap_or_else(MemberIter::empty),
+                pairs: document
+                    .member_pairs(range)
+                    .unwrap_or_else(MemberIter::empty),
             }),
         }
     }
@@ -1138,9 +1136,7 @@ impl Encode for NodeRef<'_> {
                     SlotKind::String(text) => writer.string(document.text_of(text))?,
                     SlotKind::Array(range) => {
                         writer.begin_array()?;
-                        let mut ids = document
-                            .item_ids(range)
-                            .unwrap_or_else(IndexIter::empty);
+                        let mut ids = document.item_ids(range).unwrap_or_else(IndexIter::empty);
                         writer.reserve_list(&mut tasks, ids.len().saturating_add(1))?;
                         tasks.push(Task::EndArray);
                         tasks.extend(ids.by_ref().rev().map(Task::Value));
@@ -2361,7 +2357,10 @@ mod adaptive_index_tests {
             start: 0,
             end: u32::MAX as usize,
         };
-        assert_eq!(Range32::encode(narrow).and_then(Range32::decode), Some(narrow));
+        assert_eq!(
+            Range32::encode(narrow).and_then(Range32::decode),
+            Some(narrow)
+        );
         let wide = Range {
             start: usize::try_from(1_u64 << 32).expect("fits usize"),
             end: usize::try_from(Packed40::MAX).expect("40-bit maximum fits usize"),
