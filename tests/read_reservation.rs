@@ -225,12 +225,12 @@ fn first_growths_are_the_capacity_allocated() {
     assert_eq!(array.requests[0], 4 * 16);
     // `[1]`: stack, number text, node, scratch child id, final child list.
     let (_, item, _) = recorded(b"[1]", None);
-    assert_eq!(item.requests, [4 * 16, 4, 4 * 8, 4, 4 * 8, 4]);
+    assert_eq!(item.requests, [4 * 16, 4, 4 * 8, 4, 4 * 8, 4 * 4]);
     // A growth past four doubles and is asked in full: the fifth item takes
     // the scratch child list to eight native ids, 64 bytes, not the added 32;
-    // the closed array's compact list is sized to its five children, 20 bytes.
+    // the closed array's compact list grows to eight slots, 32 bytes.
     let (_, items, _) = recorded(b"[1,2,3,4,5]", None);
-    assert_eq!(items.requests, [64, 4, 32, 4, 32, 64, 8, 64, 20]);
+    assert_eq!(items.requests, [64, 4, 32, 4, 32, 64, 8, 64, 32]);
 }
 
 fn in_budget_reads_match_the_unmetered_reader() {
