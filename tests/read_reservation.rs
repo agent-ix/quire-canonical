@@ -230,7 +230,7 @@ fn first_growths_are_the_capacity_allocated() {
     // the scratch child list to eight ids, 64 bytes, not the added 32; the
     // closed array's list is sized to its five children, 40 bytes.
     let (_, items, _) = recorded(b"[1,2,3,4,5]", None);
-    assert_eq!(items.requests, [64, 4, 64, 4, 128, 8, 64, 40]);
+    assert_eq!(items.requests, [64, 4, 64, 4, 32, 8, 128, 8, 64, 40]);
 }
 
 fn in_budget_reads_match_the_unmetered_reader() {
