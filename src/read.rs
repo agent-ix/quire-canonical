@@ -501,26 +501,6 @@ impl IndexVec {
         .map_err(ReadError::from)
     }
 
-    fn grow_push(&mut self, provision: &mut Provision<'_>, id: usize) -> Result<(), ReadError> {
-        match self {
-            Self::Bits32(values) => {
-                let id = u32::try_from(id).map_err(|_| index_allocation_error())?;
-                provision.grow(values, 1).map_err(ReadError::from)?;
-                values.push(id);
-            }
-            Self::Bits40(values) => {
-                let id = Packed40::encode(id).ok_or_else(index_allocation_error)?;
-                provision.grow(values, 1).map_err(ReadError::from)?;
-                values.push(id);
-            }
-            Self::Native(values) => {
-                provision.grow(values, 1).map_err(ReadError::from)?;
-                values.push(id);
-            }
-        }
-        Ok(())
-    }
-
     fn push_reserved(&mut self, id: usize) -> Option<()> {
         match self {
             Self::Bits32(values) => {
