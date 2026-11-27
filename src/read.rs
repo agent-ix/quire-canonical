@@ -497,13 +497,14 @@ impl Document {
     }
 
     fn slot(&self, id: usize) -> Slot {
-        match (self.ranges.get(id), self.tags.get(id)) {
-            (Some(range), Some(tag)) => Slot {
-                range: *range,
-                tag: *tag,
-            },
-            _ => Slot::null(),
-        }
+        self.checked_slot(id).unwrap_or_else(Slot::null)
+    }
+
+    fn checked_slot(&self, id: usize) -> Option<Slot> {
+        Some(Slot {
+            range: *self.ranges.get(id)?,
+            tag: *self.tags.get(id)?,
+        })
     }
 }
 

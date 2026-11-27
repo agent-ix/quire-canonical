@@ -91,7 +91,7 @@ impl Span {
     fn of(document: &Document, root: usize) -> Option<Self> {
         let mut first = root;
         loop {
-            let child = match document.slot(first).kind(document) {
+            let child = match document.checked_slot(first)?.kind(document) {
                 SlotKind::Array(range) if range.start < range.end => {
                     *document.items.get(range.start)?
                 }
@@ -112,7 +112,7 @@ impl Span {
         let mut edges = 0_usize;
         for id in first..=root {
             let inside = |child: usize| (first..id).contains(&child);
-            match document.slot(id).kind(document) {
+            match document.checked_slot(id)?.kind(document) {
                 SlotKind::Null | SlotKind::Bool(_) => {}
                 SlotKind::Number { text, .. } | SlotKind::String(text) => {
                     totals.text = totals.text.checked_add(text.end - text.start)?;
