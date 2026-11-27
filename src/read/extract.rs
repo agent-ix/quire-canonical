@@ -91,7 +91,7 @@ impl Span {
     fn of(document: &Document, root: usize) -> Option<Self> {
         let mut first = root;
         loop {
-            let child = match document.slots.get(first)?.kind(document) {
+            let child = match document.slot(first).kind(document) {
                 SlotKind::Array(range) if range.start < range.end => {
                     *document.items.get(range.start)?
                 }
@@ -112,7 +112,7 @@ impl Span {
         let mut edges = 0_usize;
         for id in first..=root {
             let inside = |child: usize| (first..id).contains(&child);
-            match document.slots.get(id)?.kind(document) {
+            match document.slot(id).kind(document) {
                 SlotKind::Null | SlotKind::Bool(_) => {}
                 SlotKind::Number { text, .. } | SlotKind::String(text) => {
                     totals.text = totals.text.checked_add(text.end - text.start)?;
@@ -166,17 +166,18 @@ impl Document {
     /// # Size and reservation
     ///
     /// A first pass counts the subtrees without allocating. The second asks
-    /// `reservation` once per list, in the order decoded text, values, array
-    /// elements, object members, returned ids, each for that list's exact
+    /// `reservation` once per list, in the order decoded text, ranges, tags,
+    /// array elements, object members, returned ids, each for that list's exact
     /// final capacity in bytes and before its only allocation. A list of zero
     /// bytes allocates nothing and is not asked for. With `T`, `S`, `I` and
     /// `M` the decoded text bytes (strings, number literals and member
     /// names), values, array elements and object members of the copied
     /// subtrees summed over `roots`, and `k = roots.len()`, the lists hold
     /// `T` bytes, `S + 1` values, `I + k` elements, `M` members and `k` ids.
-    /// On a 64-bit target that is `T + 24(S + 1) + 8(I + k) + 24M + 8k`
+    /// On a 64-bit target that is `T + 16(S + 1) + (S + 1) + 8(I + k) + 24M + 8k`
     /// bytes in all, and the returned document's
-    /// [`Document::retained_bytes`] is the first four terms. Nothing depends
+    /// [`Document::retained_bytes`] is the sum without the final `8k` ids term.
+    /// Nothing depends
     /// on the parts of `self` outside `roots`.
     ///
     /// The walk is a scan of each subtree's id run: no recursion and no
@@ -205,9 +206,9 @@ impl Document {
     /// assert_eq!(to_vec(&payload, Limits::new(1024)).expect("encodes"), br#"[{"a":"x"}]"#);
     /// // Text "a" and "x"; 3 values; 1 element; 1 member; 1 id.
     /// # #[cfg(target_pointer_width = "64")]
-    /// assert_eq!(charged.0, 2 + 24 * 3 + 8 + 24 + 8);
+    /// assert_eq!(charged.0, 2 + 16 * 3 + 3 + 8 + 24 + 8);
     /// # #[cfg(target_pointer_width = "64")]
-    /// assert_eq!(payload.retained_bytes(), 2 + 24 * 3 + 8 + 24);
+    /// assert_eq!(payload.retained_bytes(), 2 + 16 * 3 + 3 + 8 + 24);
     /// # Ok::<(), quire_canonical::ExtractError>(())
     /// ```
     ///
@@ -229,7 +230,7 @@ impl Document {
         };
         let mut sum = Totals::default();
         for root in roots {
-            if root.0 >= self.slots.len() {
+            if root.0 >= self.ranges.len() {
                 return Err(ExtractError::UnknownNode(*root));
             }
             // A document from `read` always has the layout `Span::of`
@@ -255,7 +256,8 @@ impl Document {
                     requested: sum.text,
                 })?;
         }
-        let mut slots: Vec<Slot> = exact(&mut provision, sum.slots)?;
+        let mut ranges: Vec<Range> = exact(&mut provision, sum.slots)?;
+        let mut tags: Vec<SlotTag> = exact(&mut provision, sum.slots)?;
         let mut items: Vec<usize> = exact(&mut provision, sum.items)?;
         let mut members: Vec<(Range, usize)> = exact(&mut provision, sum.members)?;
         let mut ids: Vec<NodeId> = exact(&mut provision, count)?;
@@ -263,7 +265,7 @@ impl Document {
         for root in roots {
             // Counted above, so the span is there and every list has room.
             let span = Span::of(self, root.0).ok_or(ExtractError::UnknownNode(*root))?;
-            let base = slots.len();
+            let base = ranges.len();
             let remap = |id: usize| id - span.first + base;
             for id in span.first..=span.root {
                 let slot = match self.slot(id).kind(self) {
@@ -297,21 +299,25 @@ impl Document {
                     SlotKind::Null => Slot::null(),
                     SlotKind::Bool(value) => Slot::boolean(value),
                 };
-                slots.push(slot);
+                ranges.push(slot.range);
+                tags.push(slot.tag);
             }
             ids.push(NodeId(remap(span.root)));
         }
         let start = items.len();
         items.extend(ids.iter().map(|id| id.0));
-        let root = slots.len();
-        slots.push(Slot::array(Range {
+        let root = ranges.len();
+        let root_slot = Slot::array(Range {
             start,
             end: items.len(),
-        }));
+        });
+        ranges.push(root_slot.range);
+        tags.push(root_slot.tag);
         Ok((
             Document {
                 text,
-                slots,
+                ranges,
+                tags,
                 items,
                 members,
                 root,

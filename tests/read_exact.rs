@@ -156,7 +156,8 @@ fn promised_requests(counts: &Counts) -> Vec<usize> {
     }
     for bytes in [
         counts.text,
-        24 * counts.slots,
+        16 * counts.slots,
+        counts.slots,
         8 * counts.items,
         24 * counts.members,
         8 * counts.open_items,
@@ -194,7 +195,7 @@ fn check(input: &[u8]) {
         );
         assert_eq!(
             document.retained_bytes(),
-            counts.text + 24 * counts.slots + 8 * counts.items + 24 * counts.members
+            counts.text + 16 * counts.slots + counts.slots + 8 * counts.items + 24 * counts.members
         );
     }
     for index in 0..new_recorder.requests.len() {

@@ -217,7 +217,7 @@ fn every_growth_is_asked_before_it_happens_and_denial_leaves_nothing(name: &str,
 /// The exact growth sequence of small inputs: capacity doubles from four, and
 /// each request is element size times the full new capacity.
 fn first_growths_are_the_capacity_allocated() {
-    // Decoded text of 20 bytes is asked as 20, then the node as four slots.
+    // Decoded text of 20 bytes is asked as 20, then four ranges and four tags.
     let (_, text, _) = recorded(b"\"a long enough string\"", None);
     assert_eq!(text.requests, [20, 4 * 24]);
     // An open container is one stack entry grown to four.

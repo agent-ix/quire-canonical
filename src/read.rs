@@ -6,7 +6,7 @@
 //! [`read`] parses RFC 8259 JSON text into a [`Document`] with one loop over
 //! the input and an explicit heap stack of open containers; nothing recurses,
 //! so a document of any depth reads on any thread stack. The tree is an
-//! arena: flat vectors of nodes, child ids and decoded text. Its `Clone`,
+//! arena: flat vectors of ranges and tags, child ids and decoded text. Its `Clone`,
 //! `Debug`, `PartialEq` and `Drop` therefore walk flat vectors and never
 //! recurse either.
 //!
@@ -22,7 +22,7 @@
 //!   or [`read_bounded`] (a cumulative byte count).
 //!
 //! The reader calls [`Reservation::reserve`] once before each growth of one
-//! of its lists: the nodes, the child ids and object members, the decoded
+//! of its lists: ranges, tags, child ids and object members, the decoded
 //! text, the open-container stack, the children of open containers, the
 //! duplicate-name sort buffer, and the pointer and lexeme a
 //! [`ReadError::NumberOutOfRange`] or [`ReadError::DuplicateName`] carries.
@@ -202,19 +202,12 @@ struct Range {
     end: usize,
 }
 
-/// One arena node's range and compact, explicit kind tag.
-///
-/// Numbers keep their lexeme range and are converted to `f64` when exposed or
-/// encoded. Keeping the tag separate from the range avoids the enum padding
-/// that otherwise raises every slot to 32 bytes.
+/// A temporary node value assembled from the document's paired arenas.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Slot {
     range: Range,
     tag: SlotTag,
 }
-
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<Slot>() == 24);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -320,7 +313,8 @@ fn validated_number_value(text: &str) -> f64 {
 pub struct Document {
     /// Decoded strings and number literals, back to back.
     text: String,
-    slots: Vec<Slot>,
+    ranges: Vec<Range>,
+    tags: Vec<SlotTag>,
     items: Vec<usize>,
     members: Vec<(Range, usize)>,
     root: usize,
@@ -458,8 +452,8 @@ impl<'d> Iterator for Members<'d> {
 impl ExactSizeIterator for Members<'_> {}
 
 impl Document {
-    /// The heap bytes this document holds: the capacity of its node, child,
-    /// member and text lists, the unit the reader's reservation is asked in.
+    /// The heap bytes this document holds: the capacity of its range, tag,
+    /// child, member and text lists, the unit the reader's reservation is asked in.
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         fn bytes<T>(list: &Vec<T>) -> usize {
@@ -467,7 +461,8 @@ impl Document {
         }
         self.text
             .capacity()
-            .saturating_add(bytes(&self.slots))
+            .saturating_add(bytes(&self.ranges))
+            .saturating_add(bytes(&self.tags))
             .saturating_add(bytes(&self.items))
             .saturating_add(bytes(&self.members))
     }
@@ -478,7 +473,7 @@ impl Document {
     /// there. Does not allocate.
     #[must_use]
     pub fn node(&self, id: NodeId) -> Option<NodeRef<'_>> {
-        (id.0 < self.slots.len()).then_some(NodeRef {
+        (id.0 < self.ranges.len()).then_some(NodeRef {
             document: self,
             id: id.0,
         })
@@ -502,7 +497,13 @@ impl Document {
     }
 
     fn slot(&self, id: usize) -> Slot {
-        self.slots.get(id).copied().unwrap_or_else(Slot::null)
+        match (self.ranges.get(id), self.tags.get(id)) {
+            (Some(range), Some(tag)) => Slot {
+                range: *range,
+                tag: *tag,
+            },
+            _ => Slot::null(),
+        }
     }
 }
 
@@ -664,21 +665,21 @@ pub fn read_with_reservation(
 /// grows as in [`read_with_reservation`] (doubling from four entries of 16
 /// bytes) to the deepest nesting `D` and is reused by pass 2. Pass 2 asks
 /// `reservation` once per list, before that list's one allocation, in the
-/// order text (`T` bytes), nodes (`24·V`), child ids (`8·I`), members
+/// order text (`T` bytes), ranges (`16·V`), tags (`V`), child ids (`8·I`), members
 /// (`24·M`), open-array children (`8·Hi`), open-object members (`32·Hm`)
 /// and sort buffer (`8·Ho`), skipping an empty list; then it fills them with
 /// the same grammar, and no list grows again. For an accepted input the
 /// bytes asked are therefore
 ///
 /// ```text
-/// S(D) + T + 24·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+/// S(D) + T + 16·V + V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
 /// ```
 ///
 /// where `S(D)` is the stack's growth (`16·(4 + 8 + … + c)` for the first
 /// doubling `c ≥ D`, zero when `D = 0`), a function of the document alone
 /// and less than [`read_with_reservation`] asks for the same input. The
 /// document's [`Document::retained_bytes`] is exactly
-/// `T + 24·V + 8·I + 24·M`. (The sizes are those of a 64-bit target.)
+/// `T + 16·V + V + 8·I + 24·M`. (The sizes are those of a 64-bit target.)
 ///
 /// The document, and every refusal with its offset, pointer and lexeme, are
 /// those of [`read_with_reservation`] whenever `reservation` admits every
@@ -714,8 +715,8 @@ pub fn read_with_reservation(
 /// assert_eq!(document, read(input, 1024)?);
 /// // Stack (4 entries), then text "a12bx" (5), 5 nodes, 2 child ids,
 /// // 2 members, 2 open-array children, 2 open-object members, sort buffer 2.
-/// assert_eq!(meter.0, [64, 5, 5 * 24, 2 * 8, 2 * 24, 2 * 8, 2 * 32, 2 * 8]);
-/// assert_eq!(document.retained_bytes(), 5 + 5 * 24 + 2 * 8 + 2 * 24);
+/// assert_eq!(meter.0, [64, 5, 5 * 16, 5, 2 * 8, 2 * 24, 2 * 8, 2 * 32, 2 * 8]);
+/// assert_eq!(document.retained_bytes(), 5 + 5 * 16 + 5 + 2 * 8 + 2 * 24);
 /// # Ok::<(), quire_canonical::ReadError>(())
 /// ```
 ///
@@ -940,7 +941,8 @@ trait Builder {
 #[derive(Default)]
 struct Build {
     text: String,
-    slots: Vec<Slot>,
+    ranges: Vec<Range>,
+    tags: Vec<SlotTag>,
     items: Vec<usize>,
     members: Vec<(Range, usize)>,
     /// The children of every open array, innermost last.
@@ -969,7 +971,7 @@ fn reserve_exact<T>(
 
 impl Build {
     /// A builder whose lists hold exactly what `count` counted, each reserved
-    /// once, in the order text, nodes, child ids, members, open-array
+    /// once, in the order text, ranges, tags, child ids, members, open-array
     /// children, open-object members, duplicate-sort buffer.
     fn exact(count: &Count, provision: &mut Provision<'_>) -> Result<Self, ReadError> {
         let mut build = Self::default();
@@ -982,7 +984,8 @@ impl Build {
                     requested: count.text,
                 })?;
         }
-        reserve_exact(provision, &mut build.slots, count.slots)?;
+        reserve_exact(provision, &mut build.ranges, count.slots)?;
+        reserve_exact(provision, &mut build.tags, count.slots)?;
         reserve_exact(provision, &mut build.items, count.items)?;
         reserve_exact(provision, &mut build.members, count.members)?;
         reserve_exact(
@@ -1002,7 +1005,8 @@ impl Build {
     fn into_document(self, root: usize) -> Document {
         Document {
             text: self.text,
-            slots: self.slots,
+            ranges: self.ranges,
+            tags: self.tags,
             items: self.items,
             members: self.members,
             root,
@@ -1171,16 +1175,18 @@ impl Builder for Build {
     }
 
     fn node(&mut self, provision: &mut Provision<'_>, slot: Slot) -> Result<usize, ReadError> {
-        let id = self.slots.len();
+        let id = self.ranges.len();
         provision
-            .grow(&mut self.slots, 1)
+            .grow(&mut self.ranges, 1)
             .map_err(ReadError::from)?;
-        self.slots.push(slot);
+        provision.grow(&mut self.tags, 1).map_err(ReadError::from)?;
+        self.ranges.push(slot.range);
+        self.tags.push(slot.tag);
         Ok(id)
     }
 
     fn node_count(&self) -> usize {
-        self.slots.len()
+        self.ranges.len()
     }
 
     fn children(&self, object: bool) -> usize {

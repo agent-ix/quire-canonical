@@ -18,7 +18,7 @@ const LIMITS: Limits = Limits::new(1 << 30);
 
 /// Bytes per value, array element, object member and returned id on a 64-bit
 /// target.
-const SLOT: usize = 32;
+const SLOT: usize = 17;
 const ITEM: usize = 8;
 const MEMBER: usize = 24;
 const ID: usize = 8;
@@ -118,7 +118,7 @@ fn same(left: NodeRef<'_>, right: NodeRef<'_>) -> bool {
 }
 
 /// The exact bytes the reservation is asked for, per list, zero lists left
-/// out, in the order text, values, elements, members, ids.
+/// out, in the order text, ranges, tags, elements, members, ids.
 fn expected_requests(source: &Document, roots: &[NodeId]) -> Vec<usize> {
     let mut sum = Sizes::default();
     for root in roots {
@@ -131,7 +131,8 @@ fn expected_requests(source: &Document, roots: &[NodeId]) -> Vec<usize> {
     let k = roots.len();
     [
         sum.text,
-        SLOT * (sum.slots + 1),
+        16 * (sum.slots + 1),
+        sum.slots + 1,
         ITEM * (sum.items + k),
         MEMBER * sum.members,
         ID * k,
