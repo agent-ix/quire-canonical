@@ -101,10 +101,10 @@ The encoded-input limit is checked first and before any parsing: an input over
 it is `ReadError::Limit` (`LimitKind::InputBytes`) whatever it contains, and
 the reservation is not asked anything. Past that, the reader asks
 `Reservation::reserve(bytes)` once before each growth of one of its lists
-(nodes, child ids, object members, decoded text, the open-container stack, the
-children of open containers, the duplicate-name sort buffer, and the pointer
-and lexeme of a number-out-of-range refusal, and the pointer of a
-duplicate-name refusal). The unit is the writer's: the
+(ranges, tags, child ids, object members, decoded text, the open-container
+stack, the children of open containers, the duplicate-name sort buffer, and
+the pointer and lexeme of a number-out-of-range refusal, and the pointer of a
+duplicate-name refusal). The unit is the writer's:
 bytes of the full new capacity, element size times new capacity, charged at
 each growth and never credited back, with each list grown to exactly that
 capacity. A denial is `ReadError::ReservationDenied { requested }`; nothing
@@ -116,9 +116,10 @@ including the refused growth).
 
 A `NumberOutOfRange` or `DuplicateName` refusal carries a charged JSON pointer
 (and lexeme), which it keeps for as long as the error lives; they are not
-part of the document. The scratch lists are dropped when the read returns; the `Document` keeps its
-node, child, member and text lists, `Document::retained_bytes`. A meter that
-does not refund already holds the document's charge; a refunding meter can
+part of the document. The scratch lists are dropped when the read returns;
+the `Document` keeps its ranges, tags, child ids, members and text,
+`Document::retained_bytes`. A meter that does not refund already holds the
+document's charge; a refunding meter can
 release down to `retained_bytes` and the rest when the document drops.
 Decoding or copying the document afterwards is the caller's own growth,
 charged by the caller to the same meter. There is no depth counter or fixed
@@ -135,21 +136,24 @@ the high-water marks of the children of open arrays `Hi`, of open objects
 `Hm`, and of the duplicate-name sort buffer `Ho`. Its only heap is the
 open-container stack, which grows as it does in the growing reader and is
 reused by pass 2. Pass 2 asks the reservation once per non-empty list, before
-that list's one allocation, in the order text, nodes, child ids, members,
-open-array children, open-object members and sort buffer. It then fills the
-lists, and none of them grows again. For an accepted input the bytes asked
+that list's one allocation, in the order text, ranges, tags, child ids,
+members, open-array children, open-object members and sort buffer. It then
+fills the lists, and none of them grows again. For an accepted input the bytes asked
 are
 
 ```text
-S(D) + T + 32·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+S(D) + T + R·V + V + J·I + K·M + 8·Hi + 32·Hm + 8·Ho
 ```
 
-`S(D)` is the stack's growth to the deepest nesting `D`, and the sizes are
-those of a 64-bit target. The total is always below what
-`read_with_reservation` asks for the same input. `Document::retained_bytes`
-is exactly `T + 32·V + 8·I + 24·M`. For a root object of small records, the
-growing reader asks 18x to 22x the input at 1k to 100k members, against
-about 7.3x here, and retains 8.4x to 10.3x, against 6.4x to 6.7x here.
+`S(D)` is the stack's growth to the deepest nesting `D`. `R`, `J` and `K`
+are the bytes per range, child id and object member; every value also has a
+one-byte tag. For a 64-bit target, `(R,J,K)` is `(8,4,12)` when every offset
+and index fits in 32 bits, `(10,5,15)` when they fit in 40 bits, and
+`(16,8,24)` otherwise.
+The 40-bit fields are packed into five bytes. The reader chooses the
+narrowest representation that fits the input's offsets and indexes. The
+total is always below what `read_with_reservation` asks for the same input.
+`Document::retained_bytes` is exactly `T + R·V + V + J·I + K·M`.
 
 The outcome is the same as the growing reader's whenever the reservation
 admits every request. Under a tight budget, two orders change:
@@ -176,13 +180,17 @@ root given twice, or one inside another given root, is copied twice.
 The reader's arena is in post-order, so each subtree is one contiguous run of
 ids. A first pass finds the run by following first children and counts its
 text, values, array elements and members, with no heap and no recursion. The
-second pass asks the reservation once per list, in the order text, values,
-elements, members, returned ids, each for its exact final capacity and before
+second pass asks the reservation once per list, in the order decoded text,
+ranges, tags, array elements, object members, returned ids, each for its exact
+final capacity and before
 its only allocation; a list of zero bytes is not asked for. With `T` decoded
 text bytes, `S` values, `I` array elements and `M` members summed over the
-copied subtrees, and `k` roots, that is `T + 32(S + 1) + 8(I + k) + 24M + 8k`
-bytes on a 64-bit target, of which the document retains all but the `8k` of
-returned ids. The size depends on the selected subtrees only.
+copied subtrees, and `k` roots, the 64-bit representation chooses `(R,J,K)`
+as `(8,4,12)`, `(10,5,15)` or `(16,8,24)` using the smallest width that fits
+the selected payload's byte offsets and arena indexes. Its total is
+`T + R(S + 1) + (S + 1) + J(I + k) + KM + 8k` bytes, of which the document
+retains all but the final `8k` bytes of returned ids. The size depends on the
+selected subtrees only.
 
 A denial is `ExtractError::ReservationDenied { requested }`: nothing more is
 asked or allocated, what was allocated is dropped, and the source is never

@@ -18,9 +18,9 @@ const LIMITS: Limits = Limits::new(1 << 30);
 
 /// Bytes per value, array element, object member and returned id on a 64-bit
 /// target.
-const SLOT: usize = 32;
-const ITEM: usize = 8;
-const MEMBER: usize = 24;
+const SLOT: usize = 9;
+const ITEM: usize = 4;
+const MEMBER: usize = 12;
 const ID: usize = 8;
 
 /// Records every request in order and denies the one at `deny`.
@@ -118,7 +118,7 @@ fn same(left: NodeRef<'_>, right: NodeRef<'_>) -> bool {
 }
 
 /// The exact bytes the reservation is asked for, per list, zero lists left
-/// out, in the order text, values, elements, members, ids.
+/// out, in the order text, ranges, tags, elements, members, ids.
 fn expected_requests(source: &Document, roots: &[NodeId]) -> Vec<usize> {
     let mut sum = Sizes::default();
     for root in roots {
@@ -131,7 +131,8 @@ fn expected_requests(source: &Document, roots: &[NodeId]) -> Vec<usize> {
     let k = roots.len();
     [
         sum.text,
-        SLOT * (sum.slots + 1),
+        8 * (sum.slots + 1),
+        sum.slots + 1,
         ITEM * (sum.items + k),
         MEMBER * sum.members,
         ID * k,
@@ -271,7 +272,7 @@ fn no_roots_give_an_empty_array() {
         .expect("extracts");
     assert!(ids.is_empty());
     assert_eq!(to_vec(&extract, LIMITS).expect("encodes"), b"[]");
-    assert_eq!(recorder.requests, [SLOT]);
+    assert_eq!(recorder.requests, [8, 1]);
     assert_eq!(extract.retained_bytes(), SLOT);
 }
 
@@ -284,7 +285,7 @@ fn retained_bytes_do_not_depend_on_the_unselected_remainder() {
     // values: "vv", 1.5, null, [..], {..} = 5; elements 2; members 2.
     // Plus the result array: one value and one element.
     let payload_bytes = 7 + SLOT * (5 + 1) + ITEM * (2 + 1) + MEMBER * 2;
-    assert_eq!(payload_bytes, 271);
+    assert_eq!(payload_bytes, 97);
     let mut previous = None;
     for remainder in [0_usize, 10, 1_000, 100_000] {
         let rest = vec![r#"{"x":"some unselected text","y":[1,2,3]}"#; remainder].join(",");

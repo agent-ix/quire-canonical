@@ -6,7 +6,7 @@
 //! [`read`] parses RFC 8259 JSON text into a [`Document`] with one loop over
 //! the input and an explicit heap stack of open containers; nothing recurses,
 //! so a document of any depth reads on any thread stack. The tree is an
-//! arena: flat vectors of nodes, child ids and decoded text. Its `Clone`,
+//! arena: compact, width-adaptive vectors of ranges, tags and child ids, plus decoded text. Its `Clone`,
 //! `Debug`, `PartialEq` and `Drop` therefore walk flat vectors and never
 //! recurse either.
 //!
@@ -22,7 +22,7 @@
 //!   or [`read_bounded`] (a cumulative byte count).
 //!
 //! The reader calls [`Reservation::reserve`] once before each growth of one
-//! of its lists: the nodes, the child ids and object members, the decoded
+//! of its lists: ranges, tags, child ids and object members, the decoded
 //! text, the open-container stack, the children of open containers, the
 //! duplicate-name sort buffer, and the pointer and lexeme a
 //! [`ReadError::NumberOutOfRange`] or [`ReadError::DuplicateName`] carries.
@@ -71,8 +71,10 @@
 //! * two members of one object with the same name (RFC 8785 requires I-JSON);
 //! * every other departure from the RFC 8259 grammar.
 //!
-//! A number keeps its source text next to its double value: RFC 8785 encodes
-//! the double, while a typed reader may need an integer exactly as written.
+//! A number keeps its source text after validating that it has a finite double.
+//! RFC 8785 encodes that double, while a typed reader may need an integer
+//! exactly as written; the same validated lexeme supplies the double when a
+//! caller exposes or encodes the number.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -200,22 +202,617 @@ struct Range {
     end: usize,
 }
 
-/// One node of the arena.
+/// A temporary node value assembled from the document's paired arenas.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Slot {
+struct Slot {
+    range: Range,
+    tag: SlotTag,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum SlotTag {
+    Null,
+    False,
+    True,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+/// The narrowest representation that can hold every index in one document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexWidth {
+    Bits32,
+    Bits40,
+    Native,
+}
+
+impl IndexWidth {
+    fn for_bound(bound: usize) -> Self {
+        if u32::try_from(bound).is_ok() {
+            Self::Bits32
+        } else if u64::try_from(bound).is_ok_and(|value| value <= Packed40::MAX) {
+            Self::Bits40
+        } else {
+            Self::Native
+        }
+    }
+
+    fn for_dimensions(dimensions: &[usize]) -> Self {
+        Self::for_bound(dimensions.iter().copied().max().unwrap_or(0))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Range32 {
+    start: u32,
+    end: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<Range32>() == 8);
+
+impl Range32 {
+    fn encode(range: Range) -> Option<Self> {
+        Some(Self {
+            start: u32::try_from(range.start).ok()?,
+            end: u32::try_from(range.end).ok()?,
+        })
+    }
+
+    fn decode(self) -> Option<Range> {
+        Some(Range {
+            start: usize::try_from(self.start).ok()?,
+            end: usize::try_from(self.end).ok()?,
+        })
+    }
+}
+
+/// A little-endian unsigned index stored in five bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Packed40([u8; 5]);
+
+const _: () = assert!(core::mem::size_of::<Packed40>() == 5);
+
+impl Packed40 {
+    const MAX: u64 = (1_u64 << 40) - 1;
+
+    fn encode(value: usize) -> Option<Self> {
+        let value = u64::try_from(value).ok()?;
+        if value > Self::MAX {
+            return None;
+        }
+        let mut bytes = [0_u8; 5];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let shift = u32::try_from(index.checked_mul(8)?).ok()?;
+            *byte = u8::try_from((value >> shift) & 0xff).ok()?;
+        }
+        Some(Self(bytes))
+    }
+
+    fn decode(self) -> Option<usize> {
+        let mut value = 0_u64;
+        for (index, byte) in self.0.iter().enumerate() {
+            let shift = u32::try_from(index.checked_mul(8)?).ok()?;
+            value |= u64::from(*byte) << shift;
+        }
+        usize::try_from(value).ok()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Range40 {
+    start: Packed40,
+    end: Packed40,
+}
+
+const _: () = assert!(core::mem::size_of::<Range40>() == 10);
+
+impl Range40 {
+    fn encode(range: Range) -> Option<Self> {
+        Some(Self {
+            start: Packed40::encode(range.start)?,
+            end: Packed40::encode(range.end)?,
+        })
+    }
+
+    fn decode(self) -> Option<Range> {
+        Some(Range {
+            start: self.start.decode()?,
+            end: self.end.decode()?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Member32 {
+    name: Range32,
+    id: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<Member32>() == 12);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Member40 {
+    name: Range40,
+    id: Packed40,
+}
+
+const _: () = assert!(core::mem::size_of::<Member40>() == 15);
+
+#[derive(Clone, Debug)]
+enum RangeVec {
+    Bits32(Vec<Range32>),
+    Bits40(Vec<Range40>),
+    Native(Vec<Range>),
+}
+
+impl RangeVec {
+    fn new(width: IndexWidth) -> Self {
+        match width {
+            IndexWidth::Bits32 => Self::Bits32(Vec::new()),
+            IndexWidth::Bits40 => Self::Bits40(Vec::new()),
+            IndexWidth::Native => Self::Native(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Bits32(values) => values.len(),
+            Self::Bits40(values) => values.len(),
+            Self::Native(values) => values.len(),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Bits32(values) => bytes(values),
+            Self::Bits40(values) => bytes(values),
+            Self::Native(values) => bytes(values),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<Range> {
+        match self {
+            Self::Bits32(values) => values.get(index)?.decode(),
+            Self::Bits40(values) => values.get(index)?.decode(),
+            Self::Native(values) => values.get(index).copied(),
+        }
+    }
+
+    fn reserve_exact(
+        &mut self,
+        provision: &mut Provision<'_>,
+        length: usize,
+    ) -> Result<(), ReadError> {
+        match self {
+            Self::Bits32(values) => reserve_exact(provision, values, length),
+            Self::Bits40(values) => reserve_exact(provision, values, length),
+            Self::Native(values) => reserve_exact(provision, values, length),
+        }
+    }
+
+    fn grow_push(&mut self, provision: &mut Provision<'_>, range: Range) -> Result<(), ReadError> {
+        match self {
+            Self::Bits32(values) => {
+                let range = Range32::encode(range).ok_or_else(index_allocation_error)?;
+                provision.grow(values, 1).map_err(ReadError::from)?;
+                values.push(range);
+            }
+            Self::Bits40(values) => {
+                let range = Range40::encode(range).ok_or_else(index_allocation_error)?;
+                provision.grow(values, 1).map_err(ReadError::from)?;
+                values.push(range);
+            }
+            Self::Native(values) => {
+                provision.grow(values, 1).map_err(ReadError::from)?;
+                values.push(range);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_reserved(&mut self, range: Range) -> Option<()> {
+        match self {
+            Self::Bits32(values) => values.push(Range32::encode(range)?),
+            Self::Bits40(values) => values.push(Range40::encode(range)?),
+            Self::Native(values) => values.push(range),
+        }
+        Some(())
+    }
+
+    fn logical_eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && (0..self.len()).all(|index| self.get(index) == other.get(index))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum IndexVec {
+    Bits32(Vec<u32>),
+    Bits40(Vec<Packed40>),
+    Native(Vec<usize>),
+}
+
+impl IndexVec {
+    fn new(width: IndexWidth) -> Self {
+        match width {
+            IndexWidth::Bits32 => Self::Bits32(Vec::new()),
+            IndexWidth::Bits40 => Self::Bits40(Vec::new()),
+            IndexWidth::Native => Self::Native(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Bits32(values) => values.len(),
+            Self::Bits40(values) => values.len(),
+            Self::Native(values) => values.len(),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Bits32(values) => bytes(values),
+            Self::Bits40(values) => bytes(values),
+            Self::Native(values) => bytes(values),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<usize> {
+        match self {
+            Self::Bits32(values) => usize::try_from(*values.get(index)?).ok(),
+            Self::Bits40(values) => values.get(index)?.decode(),
+            Self::Native(values) => values.get(index).copied(),
+        }
+    }
+
+    fn iter_range(&self, range: Range) -> Option<IndexIter<'_>> {
+        Some(match self {
+            Self::Bits32(values) => IndexIter::Bits32(values.get(range.start..range.end)?.iter()),
+            Self::Bits40(values) => IndexIter::Bits40(values.get(range.start..range.end)?.iter()),
+            Self::Native(values) => IndexIter::Native(values.get(range.start..range.end)?.iter()),
+        })
+    }
+
+    fn reserve_exact(
+        &mut self,
+        provision: &mut Provision<'_>,
+        length: usize,
+    ) -> Result<(), ReadError> {
+        match self {
+            Self::Bits32(values) => reserve_exact(provision, values, length),
+            Self::Bits40(values) => reserve_exact(provision, values, length),
+            Self::Native(values) => reserve_exact(provision, values, length),
+        }
+    }
+
+    fn grow_for(
+        &mut self,
+        provision: &mut Provision<'_>,
+        additional: usize,
+    ) -> Result<(), ReadError> {
+        match self {
+            Self::Bits32(values) => provision.grow(values, additional),
+            Self::Bits40(values) => provision.grow(values, additional),
+            Self::Native(values) => provision.grow(values, additional),
+        }
+        .map_err(ReadError::from)
+    }
+
+    fn push_reserved(&mut self, id: usize) -> Option<()> {
+        match self {
+            Self::Bits32(values) => {
+                values.push(u32::try_from(id).ok()?);
+            }
+            Self::Bits40(values) => values.push(Packed40::encode(id)?),
+            Self::Native(values) => values.push(id),
+        }
+        Some(())
+    }
+
+    fn logical_eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && (0..self.len()).all(|index| self.get(index) == other.get(index))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MemberVec {
+    Bits32(Vec<Member32>),
+    Bits40(Vec<Member40>),
+    Native(Vec<(Range, usize)>),
+}
+
+impl MemberVec {
+    fn new(width: IndexWidth) -> Self {
+        match width {
+            IndexWidth::Bits32 => Self::Bits32(Vec::new()),
+            IndexWidth::Bits40 => Self::Bits40(Vec::new()),
+            IndexWidth::Native => Self::Native(Vec::new()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Bits32(values) => values.len(),
+            Self::Bits40(values) => values.len(),
+            Self::Native(values) => values.len(),
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Bits32(values) => bytes(values),
+            Self::Bits40(values) => bytes(values),
+            Self::Native(values) => bytes(values),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<(Range, usize)> {
+        Some(match self {
+            Self::Bits32(values) => {
+                let member = values.get(index)?;
+                (member.name.decode()?, usize::try_from(member.id).ok()?)
+            }
+            Self::Bits40(values) => {
+                let member = values.get(index)?;
+                (member.name.decode()?, member.id.decode()?)
+            }
+            Self::Native(values) => *values.get(index)?,
+        })
+    }
+
+    fn iter_range(&self, range: Range) -> Option<MemberIter<'_>> {
+        Some(match self {
+            Self::Bits32(values) => MemberIter::Bits32(values.get(range.start..range.end)?.iter()),
+            Self::Bits40(values) => MemberIter::Bits40(values.get(range.start..range.end)?.iter()),
+            Self::Native(values) => MemberIter::Native(values.get(range.start..range.end)?.iter()),
+        })
+    }
+
+    fn reserve_exact(
+        &mut self,
+        provision: &mut Provision<'_>,
+        length: usize,
+    ) -> Result<(), ReadError> {
+        match self {
+            Self::Bits32(values) => reserve_exact(provision, values, length),
+            Self::Bits40(values) => reserve_exact(provision, values, length),
+            Self::Native(values) => reserve_exact(provision, values, length),
+        }
+    }
+
+    fn grow_for(
+        &mut self,
+        provision: &mut Provision<'_>,
+        additional: usize,
+    ) -> Result<(), ReadError> {
+        match self {
+            Self::Bits32(values) => provision.grow(values, additional),
+            Self::Bits40(values) => provision.grow(values, additional),
+            Self::Native(values) => provision.grow(values, additional),
+        }
+        .map_err(ReadError::from)
+    }
+
+    fn push_reserved(&mut self, name: Range, id: usize) -> Option<()> {
+        match self {
+            Self::Bits32(values) => values.push(Member32 {
+                name: Range32::encode(name)?,
+                id: u32::try_from(id).ok()?,
+            }),
+            Self::Bits40(values) => values.push(Member40 {
+                name: Range40::encode(name)?,
+                id: Packed40::encode(id)?,
+            }),
+            Self::Native(values) => values.push((name, id)),
+        }
+        Some(())
+    }
+
+    fn logical_eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && (0..self.len()).all(|index| self.get(index) == other.get(index))
+    }
+}
+
+fn bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(core::mem::size_of::<T>())
+}
+
+fn index_allocation_error() -> ReadError {
+    ReadError::Allocation {
+        requested: usize::MAX,
+    }
+}
+
+#[derive(Clone, Debug)]
+enum IndexIter<'a> {
+    Empty(core::iter::Empty<usize>),
+    Bits32(core::slice::Iter<'a, u32>),
+    Bits40(core::slice::Iter<'a, Packed40>),
+    Native(core::slice::Iter<'a, usize>),
+}
+
+impl Iterator for IndexIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty(values) => values.next(),
+            Self::Bits32(values) => values.next().and_then(|value| usize::try_from(*value).ok()),
+            Self::Bits40(values) => values.next().and_then(|value| value.decode()),
+            Self::Native(values) => values.next().copied(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let length = match self {
+            Self::Empty(values) => values.len(),
+            Self::Bits32(values) => values.len(),
+            Self::Bits40(values) => values.len(),
+            Self::Native(values) => values.len(),
+        };
+        (length, Some(length))
+    }
+}
+
+impl DoubleEndedIterator for IndexIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty(values) => values.next_back(),
+            Self::Bits32(values) => values
+                .next_back()
+                .and_then(|value| usize::try_from(*value).ok()),
+            Self::Bits40(values) => values.next_back().and_then(|value| value.decode()),
+            Self::Native(values) => values.next_back().copied(),
+        }
+    }
+}
+
+impl ExactSizeIterator for IndexIter<'_> {}
+
+impl<'a> IndexIter<'a> {
+    fn empty() -> Self {
+        Self::Empty(core::iter::empty())
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MemberIter<'a> {
+    Empty(core::iter::Empty<(Range, usize)>),
+    Bits32(core::slice::Iter<'a, Member32>),
+    Bits40(core::slice::Iter<'a, Member40>),
+    Native(core::slice::Iter<'a, (Range, usize)>),
+}
+
+impl Iterator for MemberIter<'_> {
+    type Item = (Range, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty(values) => values.next(),
+            Self::Bits32(values) => values
+                .next()
+                .and_then(|member| Some((member.name.decode()?, usize::try_from(member.id).ok()?))),
+            Self::Bits40(values) => values
+                .next()
+                .and_then(|member| Some((member.name.decode()?, member.id.decode()?))),
+            Self::Native(values) => values.next().copied(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let length = match self {
+            Self::Empty(values) => values.len(),
+            Self::Bits32(values) => values.len(),
+            Self::Bits40(values) => values.len(),
+            Self::Native(values) => values.len(),
+        };
+        (length, Some(length))
+    }
+}
+
+impl DoubleEndedIterator for MemberIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty(values) => values.next_back(),
+            Self::Bits32(values) => values
+                .next_back()
+                .and_then(|member| Some((member.name.decode()?, usize::try_from(member.id).ok()?))),
+            Self::Bits40(values) => values
+                .next_back()
+                .and_then(|member| Some((member.name.decode()?, member.id.decode()?))),
+            Self::Native(values) => values.next_back().copied(),
+        }
+    }
+}
+
+impl ExactSizeIterator for MemberIter<'_> {}
+
+impl<'a> MemberIter<'a> {
+    fn empty() -> Self {
+        Self::Empty(core::iter::empty())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SlotKind {
     Null,
     Bool(bool),
-    /// The literal's source text in `text`, and its double.
-    Number {
-        text: Range,
-        value: f64,
-    },
-    /// The decoded string in `text`.
+    Number { text: Range, value: f64 },
     String(Range),
-    /// Child ids in `items`.
     Array(Range),
-    /// `(name, value)` pairs in `members`, in document order.
     Object(Range),
+}
+
+impl Slot {
+    const fn null() -> Self {
+        Self {
+            range: Range { start: 0, end: 0 },
+            tag: SlotTag::Null,
+        }
+    }
+
+    const fn boolean(value: bool) -> Self {
+        let tag = if value { SlotTag::True } else { SlotTag::False };
+        Self {
+            range: Range { start: 0, end: 0 },
+            tag,
+        }
+    }
+
+    const fn number(text: Range) -> Self {
+        Self {
+            range: text,
+            tag: SlotTag::Number,
+        }
+    }
+
+    const fn string(text: Range) -> Self {
+        Self {
+            range: text,
+            tag: SlotTag::String,
+        }
+    }
+
+    const fn array(children: Range) -> Self {
+        Self {
+            range: children,
+            tag: SlotTag::Array,
+        }
+    }
+
+    const fn object(members: Range) -> Self {
+        Self {
+            range: members,
+            tag: SlotTag::Object,
+        }
+    }
+
+    fn kind(self, document: &Document) -> SlotKind {
+        match self.tag {
+            SlotTag::Null => SlotKind::Null,
+            SlotTag::False => SlotKind::Bool(false),
+            SlotTag::True => SlotKind::Bool(true),
+            SlotTag::Number => SlotKind::Number {
+                text: self.range,
+                value: validated_number_value(document.text_of(self.range)),
+            },
+            SlotTag::String => SlotKind::String(self.range),
+            SlotTag::Array => SlotKind::Array(self.range),
+            SlotTag::Object => SlotKind::Object(self.range),
+        }
+    }
+}
+
+fn validated_number_value(text: &str) -> f64 {
+    // The parser validates this exact lexeme as a finite f64 before creating
+    // its Number slot, and the document's text is immutable afterwards.
+    text.parse::<f64>()
+        .expect("a stored number lexeme was validated by the parser")
 }
 
 /// A JSON document read by [`read`]: an arena tree of its values.
@@ -229,14 +826,26 @@ enum Slot {
 /// spellings. `{"a":1,"b":2}` and `{"b":2,"a":1}` differ, and so do `1` and
 /// `1.0`. Two documents denote the same JSON value exactly when their RFC
 /// 8785 bytes are equal.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Document {
     /// Decoded strings and number literals, back to back.
     text: String,
-    slots: Vec<Slot>,
-    items: Vec<usize>,
-    members: Vec<(Range, usize)>,
+    ranges: RangeVec,
+    tags: Vec<SlotTag>,
+    items: IndexVec,
+    members: MemberVec,
     root: usize,
+}
+
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.root == other.root
+            && self.tags == other.tags
+            && self.ranges.logical_eq(&other.ranges)
+            && self.items.logical_eq(&other.items)
+            && self.members.logical_eq(&other.members)
+    }
 }
 
 /// The position of one value in a [`Document`]'s arena.
@@ -303,7 +912,7 @@ impl<'d> Number<'d> {
 #[derive(Clone)]
 pub struct Items<'d> {
     document: &'d Document,
-    ids: core::slice::Iter<'d, usize>,
+    ids: IndexIter<'d>,
 }
 
 impl fmt::Debug for Items<'_> {
@@ -319,7 +928,7 @@ impl<'d> Iterator for Items<'d> {
     type Item = NodeRef<'d>;
 
     fn next(&mut self) -> Option<NodeRef<'d>> {
-        let id = *self.ids.next()?;
+        let id = self.ids.next()?;
         Some(NodeRef {
             document: self.document,
             id,
@@ -337,7 +946,7 @@ impl ExactSizeIterator for Items<'_> {}
 #[derive(Clone)]
 pub struct Members<'d> {
     document: &'d Document,
-    pairs: core::slice::Iter<'d, (Range, usize)>,
+    pairs: MemberIter<'d>,
 }
 
 impl fmt::Debug for Members<'_> {
@@ -353,7 +962,7 @@ impl<'d> Iterator for Members<'d> {
     type Item = (&'d str, NodeRef<'d>);
 
     fn next(&mut self) -> Option<(&'d str, NodeRef<'d>)> {
-        let (name, id) = *self.pairs.next()?;
+        let (name, id) = self.pairs.next()?;
         Some((
             self.document.text_of(name),
             NodeRef {
@@ -371,18 +980,16 @@ impl<'d> Iterator for Members<'d> {
 impl ExactSizeIterator for Members<'_> {}
 
 impl Document {
-    /// The heap bytes this document holds: the capacity of its node, child,
-    /// member and text lists, the unit the reader's reservation is asked in.
+    /// The heap bytes this document holds: the capacity of its range, tag,
+    /// child, member and text lists, the unit the reader's reservation is asked in.
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
-        fn bytes<T>(list: &Vec<T>) -> usize {
-            list.capacity().saturating_mul(core::mem::size_of::<T>())
-        }
         self.text
             .capacity()
-            .saturating_add(bytes(&self.slots))
-            .saturating_add(bytes(&self.items))
-            .saturating_add(bytes(&self.members))
+            .saturating_add(self.ranges.retained_bytes())
+            .saturating_add(bytes(&self.tags))
+            .saturating_add(self.items.retained_bytes())
+            .saturating_add(self.members.retained_bytes())
     }
 
     /// The value at `id`, or `None` when `id` is past this document's last
@@ -391,7 +998,7 @@ impl Document {
     /// there. Does not allocate.
     #[must_use]
     pub fn node(&self, id: NodeId) -> Option<NodeRef<'_>> {
-        (id.0 < self.slots.len()).then_some(NodeRef {
+        (id.0 < self.ranges.len()).then_some(NodeRef {
             document: self,
             id: id.0,
         })
@@ -415,7 +1022,22 @@ impl Document {
     }
 
     fn slot(&self, id: usize) -> Slot {
-        self.slots.get(id).copied().unwrap_or(Slot::Null)
+        self.checked_slot(id).unwrap_or_else(Slot::null)
+    }
+
+    fn checked_slot(&self, id: usize) -> Option<Slot> {
+        Some(Slot {
+            range: self.ranges.get(id)?,
+            tag: *self.tags.get(id)?,
+        })
+    }
+
+    fn item_ids(&self, range: Range) -> Option<IndexIter<'_>> {
+        self.items.iter_range(range)
+    }
+
+    fn member_pairs(&self, range: Range) -> Option<MemberIter<'_>> {
+        self.members.iter_range(range)
     }
 }
 
@@ -430,29 +1052,23 @@ impl<'d> NodeRef<'d> {
     #[must_use]
     pub fn node(&self) -> Node<'d> {
         let document = self.document;
-        match document.slot(self.id) {
-            Slot::Null => Node::Null,
-            Slot::Bool(value) => Node::Bool(value),
-            Slot::Number { text, value } => Node::Number(Number {
+        match document.slot(self.id).kind(document) {
+            SlotKind::Null => Node::Null,
+            SlotKind::Bool(value) => Node::Bool(value),
+            SlotKind::Number { text, value } => Node::Number(Number {
                 text: document.text_of(text),
                 value,
             }),
-            Slot::String(text) => Node::String(document.text_of(text)),
-            Slot::Array(range) => Node::Array(Items {
+            SlotKind::String(text) => Node::String(document.text_of(text)),
+            SlotKind::Array(range) => Node::Array(Items {
                 document,
-                ids: document
-                    .items
-                    .get(range.start..range.end)
-                    .unwrap_or_default()
-                    .iter(),
+                ids: document.item_ids(range).unwrap_or_else(IndexIter::empty),
             }),
-            Slot::Object(range) => Node::Object(Members {
+            SlotKind::Object(range) => Node::Object(Members {
                 document,
                 pairs: document
-                    .members
-                    .get(range.start..range.end)
-                    .unwrap_or_default()
-                    .iter(),
+                    .member_pairs(range)
+                    .unwrap_or_else(MemberIter::empty),
             }),
         }
     }
@@ -493,35 +1109,31 @@ impl Encode for NodeRef<'_> {
         tasks.push(Task::Value(self.id));
         while let Some(task) = tasks.pop() {
             match task {
-                Task::Value(id) => match document.slot(id) {
-                    Slot::Null => writer.null()?,
-                    Slot::Bool(value) => writer.bool(value)?,
-                    Slot::Number { value, .. } => writer.number(value)?,
-                    Slot::String(text) => writer.string(document.text_of(text))?,
-                    Slot::Array(range) => {
+                Task::Value(id) => match document.slot(id).kind(document) {
+                    SlotKind::Null => writer.null()?,
+                    SlotKind::Bool(value) => writer.bool(value)?,
+                    SlotKind::Number { value, .. } => writer.number(value)?,
+                    SlotKind::String(text) => writer.string(document.text_of(text))?,
+                    SlotKind::Array(range) => {
                         writer.begin_array()?;
-                        let ids = document
-                            .items
-                            .get(range.start..range.end)
-                            .unwrap_or_default();
+                        let mut ids = document.item_ids(range).unwrap_or_else(IndexIter::empty);
                         writer.reserve_list(&mut tasks, ids.len().saturating_add(1))?;
                         tasks.push(Task::EndArray);
-                        tasks.extend(ids.iter().rev().map(|id| Task::Value(*id)));
+                        tasks.extend(ids.by_ref().rev().map(Task::Value));
                     }
-                    Slot::Object(range) => {
+                    SlotKind::Object(range) => {
                         writer.begin_object()?;
-                        let pairs = document
-                            .members
-                            .get(range.start..range.end)
-                            .unwrap_or_default();
+                        let mut pairs = document
+                            .member_pairs(range)
+                            .unwrap_or_else(MemberIter::empty);
                         writer.reserve_list(
                             &mut tasks,
                             pairs.len().saturating_mul(2).saturating_add(1),
                         )?;
                         tasks.push(Task::EndObject);
-                        for (name, id) in pairs.iter().rev() {
-                            tasks.push(Task::Value(*id));
-                            tasks.push(Task::Name(*name));
+                        for (name, id) in pairs.by_ref().rev() {
+                            tasks.push(Task::Value(id));
+                            tasks.push(Task::Name(name));
                         }
                     }
                 },
@@ -577,21 +1189,24 @@ pub fn read_with_reservation(
 /// grows as in [`read_with_reservation`] (doubling from four entries of 16
 /// bytes) to the deepest nesting `D` and is reused by pass 2. Pass 2 asks
 /// `reservation` once per list, before that list's one allocation, in the
-/// order text (`T` bytes), nodes (`32·V`), child ids (`8·I`), members
-/// (`24·M`), open-array children (`8·Hi`), open-object members (`32·Hm`)
+/// order text (`T` bytes), ranges, tags, child ids, members, open-array
+/// children (`8·Hi`), open-object members (`32·Hm`)
 /// and sort buffer (`8·Ho`), skipping an empty list; then it fills them with
 /// the same grammar, and no list grows again. For an accepted input the
 /// bytes asked are therefore
 ///
 /// ```text
-/// S(D) + T + 32·V + 8·I + 24·M + 8·Hi + 32·Hm + 8·Ho
+/// S(D) + T + R·V + V + J·I + K·M + 8·Hi + 32·Hm + 8·Ho
 /// ```
 ///
 /// where `S(D)` is the stack's growth (`16·(4 + 8 + … + c)` for the first
 /// doubling `c ≥ D`, zero when `D = 0`), a function of the document alone
 /// and less than [`read_with_reservation`] asks for the same input. The
-/// document's [`Document::retained_bytes`] is exactly
-/// `T + 32·V + 8·I + 24·M`. (The sizes are those of a 64-bit target.)
+/// document's [`Document::retained_bytes`] is exactly `T + R·V + V + J·I + K·M`.
+/// For a 64-bit target, `(R,J,K)` is `(8,4,12)` when every index fits in 32
+/// bits, `(10,5,15)` when every index fits in 40 bits, and `(16,8,24)` otherwise.
+/// The chosen width is the narrowest that can represent every byte offset and
+/// arena index; the 40-bit fields are explicitly packed.
 ///
 /// The document, and every refusal with its offset, pointer and lexeme, are
 /// those of [`read_with_reservation`] whenever `reservation` admits every
@@ -627,8 +1242,8 @@ pub fn read_with_reservation(
 /// assert_eq!(document, read(input, 1024)?);
 /// // Stack (4 entries), then text "a12bx" (5), 5 nodes, 2 child ids,
 /// // 2 members, 2 open-array children, 2 open-object members, sort buffer 2.
-/// assert_eq!(meter.0, [64, 5, 5 * 32, 2 * 8, 2 * 24, 2 * 8, 2 * 32, 2 * 8]);
-/// assert_eq!(document.retained_bytes(), 5 + 5 * 32 + 2 * 8 + 2 * 24);
+/// assert_eq!(meter.0, [64, 5, 5 * 8, 5, 2 * 4, 2 * 12, 2 * 8, 2 * 32, 2 * 8]);
+/// assert_eq!(document.retained_bytes(), 5 + 5 * 8 + 5 + 2 * 4 + 2 * 12);
 /// # Ok::<(), quire_canonical::ReadError>(())
 /// ```
 ///
@@ -723,7 +1338,8 @@ fn read_provisioned(
     provision: Provision<'_>,
 ) -> Result<Document, ReadError> {
     let source = admit(input, max_input_bytes)?;
-    let mut parser = Parser::new(source, provision, Vec::new(), Build::default());
+    let width = IndexWidth::for_bound(source.len());
+    let mut parser = Parser::new(source, provision, Vec::new(), Build::new(width));
     let root = parser.run()?;
     Ok(parser.builder.into_document(root))
 }
@@ -734,6 +1350,7 @@ fn read_exact_provisioned(
     provision: Provision<'_>,
 ) -> Result<Document, ReadError> {
     let source = admit(input, max_input_bytes)?;
+    let width = IndexWidth::for_bound(source.len());
     // Pass 1: the grammar with the counting builder. Its only heap is the
     // open-container stack.
     let mut counting = Parser::new(source, provision, Vec::new(), Count::default());
@@ -762,7 +1379,7 @@ fn read_exact_provisioned(
     // with the building builder. The stack keeps pass 1's capacity, which
     // already holds the deepest nesting.
     stack.clear();
-    let build = Build::exact(&count, &mut provision)?;
+    let build = Build::exact(&count, width, &mut provision)?;
     let mut parser = Parser::new(source, provision, stack, build);
     let root = parser.run()?;
     Ok(parser.builder.into_document(root))
@@ -850,12 +1467,12 @@ trait Builder {
 
 /// The builder that makes the [`Document`], growing each list through the
 /// provision as it fills.
-#[derive(Default)]
 struct Build {
     text: String,
-    slots: Vec<Slot>,
-    items: Vec<usize>,
-    members: Vec<(Range, usize)>,
+    ranges: RangeVec,
+    tags: Vec<SlotTag>,
+    items: IndexVec,
+    members: MemberVec,
     /// The children of every open array, innermost last.
     scratch_items: Vec<usize>,
     /// The members of every open object, innermost last.
@@ -881,11 +1498,28 @@ fn reserve_exact<T>(
 }
 
 impl Build {
+    fn new(width: IndexWidth) -> Self {
+        Self {
+            text: String::new(),
+            ranges: RangeVec::new(width),
+            tags: Vec::new(),
+            items: IndexVec::new(width),
+            members: MemberVec::new(width),
+            scratch_items: Vec::new(),
+            scratch_members: Vec::new(),
+            order: Vec::new(),
+        }
+    }
+
     /// A builder whose lists hold exactly what `count` counted, each reserved
-    /// once, in the order text, nodes, child ids, members, open-array
+    /// once, in the order text, ranges, tags, child ids, members, open-array
     /// children, open-object members, duplicate-sort buffer.
-    fn exact(count: &Count, provision: &mut Provision<'_>) -> Result<Self, ReadError> {
-        let mut build = Self::default();
+    fn exact(
+        count: &Count,
+        width: IndexWidth,
+        provision: &mut Provision<'_>,
+    ) -> Result<Self, ReadError> {
+        let mut build = Self::new(width);
         if count.text > 0 {
             provision.charge(count.text).map_err(ReadError::from)?;
             build
@@ -895,9 +1529,10 @@ impl Build {
                     requested: count.text,
                 })?;
         }
-        reserve_exact(provision, &mut build.slots, count.slots)?;
-        reserve_exact(provision, &mut build.items, count.items)?;
-        reserve_exact(provision, &mut build.members, count.members)?;
+        build.ranges.reserve_exact(provision, count.slots)?;
+        reserve_exact(provision, &mut build.tags, count.slots)?;
+        build.items.reserve_exact(provision, count.items)?;
+        build.members.reserve_exact(provision, count.members)?;
         reserve_exact(
             provision,
             &mut build.scratch_items,
@@ -915,7 +1550,8 @@ impl Build {
     fn into_document(self, root: usize) -> Document {
         Document {
             text: self.text,
-            slots: self.slots,
+            ranges: self.ranges,
+            tags: self.tags,
             items: self.items,
             members: self.members,
             root,
@@ -1084,16 +1720,15 @@ impl Builder for Build {
     }
 
     fn node(&mut self, provision: &mut Provision<'_>, slot: Slot) -> Result<usize, ReadError> {
-        let id = self.slots.len();
-        provision
-            .grow(&mut self.slots, 1)
-            .map_err(ReadError::from)?;
-        self.slots.push(slot);
+        let id = self.ranges.len();
+        self.ranges.grow_push(provision, slot.range)?;
+        provision.grow(&mut self.tags, 1).map_err(ReadError::from)?;
+        self.tags.push(slot.tag);
         Ok(id)
     }
 
     fn node_count(&self) -> usize {
-        self.slots.len()
+        self.ranges.len()
     }
 
     fn children(&self, object: bool) -> usize {
@@ -1141,25 +1776,28 @@ impl Builder for Build {
             self.check_unique_names(provision, stack, open.start)?;
             let pending = self.scratch_members.get(open.start..).unwrap_or_default();
             let start = self.members.len();
-            provision
-                .grow(&mut self.members, pending.len())
-                .map_err(ReadError::from)?;
-            self.members
-                .extend(pending.iter().map(|member| (member.name, member.id)));
+            self.members.grow_for(provision, pending.len())?;
+            for member in pending {
+                self.members
+                    .push_reserved(member.name, member.id)
+                    .ok_or_else(index_allocation_error)?;
+            }
             self.scratch_members.truncate(open.start);
-            Slot::Object(Range {
+            Slot::object(Range {
                 start,
                 end: self.members.len(),
             })
         } else {
             let items = self.scratch_items.get(open.start..).unwrap_or_default();
             let start = self.items.len();
-            provision
-                .grow(&mut self.items, items.len())
-                .map_err(ReadError::from)?;
-            self.items.extend_from_slice(items);
+            self.items.grow_for(provision, items.len())?;
+            for id in items {
+                self.items
+                    .push_reserved(*id)
+                    .ok_or_else(index_allocation_error)?;
+            }
             self.scratch_items.truncate(open.start);
-            Slot::Array(Range {
+            Slot::array(Range {
                 start,
                 end: self.items.len(),
             })
@@ -1272,7 +1910,7 @@ impl Builder for Count {
             let start = self.members;
             self.members = self.members.saturating_add(width);
             self.scratch_members = open.start;
-            Slot::Object(Range {
+            Slot::object(Range {
                 start,
                 end: self.members,
             })
@@ -1281,7 +1919,7 @@ impl Builder for Count {
             let start = self.items;
             self.items = self.items.saturating_add(width);
             self.scratch_items = open.start;
-            Slot::Array(Range {
+            Slot::array(Range {
                 start,
                 end: self.items,
             })
@@ -1446,10 +2084,10 @@ impl<'i, 'r, B: Builder> Parser<'i, 'r, B> {
                     Expect::ValueOrEnd
                 });
             }
-            b'"' => Slot::String(self.string()?),
-            b't' => self.literal("true", Slot::Bool(true))?,
-            b'f' => self.literal("false", Slot::Bool(false))?,
-            b'n' => self.literal("null", Slot::Null)?,
+            b'"' => Slot::string(self.string()?),
+            b't' => self.literal("true", Slot::boolean(true))?,
+            b'f' => self.literal("false", Slot::boolean(false))?,
+            b'n' => self.literal("null", Slot::null())?,
             b'-' | b'0'..=b'9' => self.number()?,
             _ => return Err(self.malformed(start, Malformed::UnexpectedCharacter)),
         };
@@ -1664,18 +2302,62 @@ impl<'i, 'r, B: Builder> Parser<'i, 'r, B> {
         }
         let text_start = self.builder.text_len();
         self.append(literal)?;
-        Ok(Slot::Number {
-            text: Range {
-                start: text_start,
-                end: self.builder.text_len(),
-            },
-            value,
-        })
+        Ok(Slot::number(Range {
+            start: text_start,
+            end: self.builder.text_len(),
+        }))
     }
 
     fn digits(&mut self) {
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.position += 1;
         }
+    }
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+mod adaptive_index_tests {
+    use super::{IndexWidth, Packed40, Range, Range32, Range40};
+
+    #[test]
+    fn packed_indices_check_and_round_trip_width_boundaries() {
+        for value in [
+            0,
+            u32::MAX as usize,
+            usize::try_from(1_u64 << 32).expect("fits usize"),
+        ] {
+            let encoded = Packed40::encode(value).expect("fits in 40 bits");
+            assert_eq!(encoded.decode(), Some(value));
+        }
+        assert_eq!(
+            Packed40::encode(usize::try_from(Packed40::MAX).unwrap() + 1),
+            None
+        );
+        let narrow = Range {
+            start: 0,
+            end: u32::MAX as usize,
+        };
+        assert_eq!(
+            Range32::encode(narrow).and_then(Range32::decode),
+            Some(narrow)
+        );
+        let wide = Range {
+            start: usize::try_from(1_u64 << 32).expect("fits usize"),
+            end: usize::try_from(Packed40::MAX).expect("40-bit maximum fits usize"),
+        };
+        assert_eq!(Range40::encode(wide).and_then(Range40::decode), Some(wide));
+    }
+
+    #[test]
+    fn width_selection_uses_the_narrowest_representable_bound() {
+        assert_eq!(IndexWidth::for_bound(u32::MAX as usize), IndexWidth::Bits32);
+        assert_eq!(
+            IndexWidth::for_bound(usize::try_from(1_u64 << 32).expect("fits usize")),
+            IndexWidth::Bits40
+        );
+        assert_eq!(
+            IndexWidth::for_bound(usize::try_from(Packed40::MAX).unwrap()),
+            IndexWidth::Bits40
+        );
     }
 }

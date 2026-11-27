@@ -95,10 +95,10 @@ fn every_allocation_follows_its_request() {
         .extract_with_reservation(&roots, &mut recorder)
         .expect("extracts");
     let held = CURRENT.load(Ordering::SeqCst) - recorder.baseline;
-    // Five lists, each asked once, and the heap when each was asked is the
+    // Six lists, each asked once, and the heap when each was asked is the
     // sum of the earlier requests: nothing was allocated before its request
     // or outside one.
-    assert_eq!(recorder.requests.len(), 5);
+    assert_eq!(recorder.requests.len(), 6);
     let mut earlier = 0;
     for (request, live) in recorder.requests.iter().zip(&recorder.live_when_asked) {
         assert_eq!(*live, earlier);
