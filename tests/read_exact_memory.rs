@@ -106,7 +106,7 @@ fn the_counting_pass_holds_nothing_but_the_stack() {
     // first request is pass 2's text, with nothing live.
     let mut recorder = Recorder::new();
     let document = read_exact_with_reservation(b"\"abc\"", u64::MAX, &mut recorder).expect("reads");
-    assert_eq!(recorder.requests, [3, 24]);
+    assert_eq!(recorder.requests, [3, 8, 1]);
     assert_eq!(recorder.peak_when_asked[0], 0);
     drop(document);
 
@@ -119,7 +119,7 @@ fn the_counting_pass_holds_nothing_but_the_stack() {
             read_exact_with_reservation(input.as_bytes(), u64::MAX, &mut recorder).expect("reads");
         assert_eq!(
             recorder.requests,
-            [64, width, 24 * (width + 1), 8 * width, 8 * width],
+            [64, width, 8 * (width + 1), width + 1, 4 * width, 8 * width],
             "width {width}"
         );
         assert_eq!(recorder.live_when_asked[1], 64, "width {width}");
