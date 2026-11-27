@@ -13,7 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{Document, NodeId, Range, Slot, SlotKind};
+use super::{Document, NodeId, Range, Slot, SlotKind, SlotTag};
 use crate::reservation::{Provision, Refusal};
 use crate::Reservation;
 
