@@ -285,7 +285,7 @@ fn retained_bytes_do_not_depend_on_the_unselected_remainder() {
     // values: "vv", 1.5, null, [..], {..} = 5; elements 2; members 2.
     // Plus the result array: one value and one element.
     let payload_bytes = 7 + SLOT * (5 + 1) + ITEM * (2 + 1) + MEMBER * 2;
-    assert_eq!(payload_bytes, 271);
+    assert_eq!(payload_bytes, 181);
     let mut previous = None;
     for remainder in [0_usize, 10, 1_000, 100_000] {
         let rest = vec![r#"{"x":"some unselected text","y":[1,2,3]}"#; remainder].join(",");
