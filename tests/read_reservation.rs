@@ -196,12 +196,12 @@ fn every_growth_is_asked_before_it_happens_and_denial_leaves_nothing(name: &str,
     );
     // Denying any one request refuses with that request's bytes, keeps no
     // heap and returns no document.
-    for index in 0..recorder.requests.len() {
+    for (index, requested_bytes) in recorder.requests.iter().copied().enumerate() {
         let (outcome, denying, live) = recorded(text.as_bytes(), Some(index));
         assert!(
             matches!(
                 outcome,
-                Err(ReadError::ReservationDenied { requested }) if requested == recorder.requests[index]
+                Err(ReadError::ReservationDenied { requested }) if requested == requested_bytes
             ),
             "{name}: request {index}: {outcome:?}"
         );
@@ -311,12 +311,12 @@ fn error_paths_charge_their_pointer_and_lexeme() {
         (br#"[{"k":1,"k":2}]"#, &duplicate),
     ] {
         assert!(log.peak <= log.total(), "{input:?}: peak {}", log.peak);
-        for index in 0..log.requests.len() {
+        for (index, requested_bytes) in log.requests.iter().copied().enumerate() {
             let (outcome, denying, live) = recorded(input, Some(index));
             assert!(
                 matches!(
                     outcome,
-                    Err(ReadError::ReservationDenied { requested }) if requested == log.requests[index]
+                    Err(ReadError::ReservationDenied { requested }) if requested == requested_bytes
                 ),
                 "{input:?}: request {index}: {outcome:?}"
             );
