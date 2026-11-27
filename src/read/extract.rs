@@ -13,7 +13,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{Document, NodeId, Range, Slot, SlotKind, SlotTag};
+use super::{
+    Document, IndexWidth, MemberVec, NodeId, Range, RangeVec, Slot, SlotKind, SlotTag,
+    IndexVec,
+};
 use crate::reservation::{Provision, Refusal};
 use crate::Reservation;
 
@@ -93,10 +96,10 @@ impl Span {
         loop {
             let child = match document.checked_slot(first)?.kind(document) {
                 SlotKind::Array(range) if range.start < range.end => {
-                    *document.items.get(range.start)?
+                    document.item_ids(range)?.next()?
                 }
                 SlotKind::Object(range) if range.start < range.end => {
-                    document.members.get(range.start)?.1
+                    document.member_pairs(range)?.next()?.1
                 }
                 _ => break,
             };
@@ -118,17 +121,17 @@ impl Span {
                     totals.text = totals.text.checked_add(text.end - text.start)?;
                 }
                 SlotKind::Array(range) => {
-                    let ids = document.items.get(range.start..range.end)?;
-                    if !ids.iter().all(|child| inside(*child)) {
+                    let ids = document.item_ids(range)?;
+                    if !ids.clone().all(inside) {
                         return None;
                     }
                     totals.items = totals.items.checked_add(ids.len())?;
                     edges = edges.checked_add(ids.len())?;
                 }
                 SlotKind::Object(range) => {
-                    let pairs = document.members.get(range.start..range.end)?;
-                    for (name, child) in pairs {
-                        if !inside(*child) {
+                    let pairs = document.member_pairs(range)?;
+                    for (name, child) in pairs.clone() {
+                        if !inside(child) {
                             return None;
                         }
                         totals.text = totals.text.checked_add(name.end - name.start)?;
@@ -174,7 +177,10 @@ impl Document {
     /// names), values, array elements and object members of the copied
     /// subtrees summed over `roots`, and `k = roots.len()`, the lists hold
     /// `T` bytes, `S + 1` values, `I + k` elements, `M` members and `k` ids.
-    /// On a 64-bit target that is `T + 16(S + 1) + (S + 1) + 8(I + k) + 24M + 8k`
+    /// On a 64-bit target, the index widths `(R,J,K)` are `(8,4,12)` when
+    /// every offset fits in 32 bits, `(10,5,15)` when every offset fits in 40
+    /// bits, and `(16,8,24)` otherwise. The total is
+    /// `T + R(S + 1) + (S + 1) + J(I + k) + KM + 8k`.
     /// bytes in all, and the returned document's
     /// [`Document::retained_bytes`] is the sum without the final `8k` ids term.
     /// Nothing depends
@@ -206,9 +212,9 @@ impl Document {
     /// assert_eq!(to_vec(&payload, Limits::new(1024)).expect("encodes"), br#"[{"a":"x"}]"#);
     /// // Text "a" and "x"; 3 values; 1 element; 1 member; 1 id.
     /// # #[cfg(target_pointer_width = "64")]
-    /// assert_eq!(charged.0, 2 + 16 * 3 + 3 + 8 + 24 + 8);
+    /// assert_eq!(charged.0, 2 + 8 * 3 + 3 + 4 + 12 + 8);
     /// # #[cfg(target_pointer_width = "64")]
-    /// assert_eq!(payload.retained_bytes(), 2 + 16 * 3 + 3 + 8 + 24);
+    /// assert_eq!(payload.retained_bytes(), 2 + 8 * 3 + 3 + 4 + 12);
     /// # Ok::<(), quire_canonical::ExtractError>(())
     /// ```
     ///
@@ -256,10 +262,19 @@ impl Document {
                     requested: sum.text,
                 })?;
         }
-        let mut ranges: Vec<Range> = exact(&mut provision, sum.slots)?;
+        let width = IndexWidth::for_dimensions(&[
+            sum.text,
+            sum.slots,
+            sum.items,
+            sum.members,
+        ]);
+        let mut ranges = RangeVec::new(width);
+        ranges.reserve_exact(&mut provision, sum.slots)?;
         let mut tags: Vec<SlotTag> = exact(&mut provision, sum.slots)?;
-        let mut items: Vec<usize> = exact(&mut provision, sum.items)?;
-        let mut members: Vec<(Range, usize)> = exact(&mut provision, sum.members)?;
+        let mut items = IndexVec::new(width);
+        items.reserve_exact(&mut provision, sum.items)?;
+        let mut members = MemberVec::new(width);
+        members.reserve_exact(&mut provision, sum.members)?;
         let mut ids: Vec<NodeId> = exact(&mut provision, count)?;
 
         for root in roots {
@@ -277,8 +292,16 @@ impl Document {
                     }
                     SlotKind::Array(range) => {
                         let start = items.len();
-                        let children = self.items.get(range.start..range.end).unwrap_or_default();
-                        items.extend(children.iter().map(|child| remap(*child)));
+                        let children = self
+                            .item_ids(range)
+                            .unwrap_or_else(super::IndexIter::empty);
+                        for child in children {
+                            items
+                                .push_reserved(remap(child))
+                                .ok_or(ExtractError::Allocation {
+                                    requested: usize::MAX,
+                                })?;
+                        }
                         Slot::array(Range {
                             start,
                             end: items.len(),
@@ -286,10 +309,16 @@ impl Document {
                     }
                     SlotKind::Object(range) => {
                         let start = members.len();
-                        let pairs = self.members.get(range.start..range.end).unwrap_or_default();
+                        let pairs = self
+                            .member_pairs(range)
+                            .unwrap_or_else(super::MemberIter::empty);
                         for (name, child) in pairs {
-                            let name = copy_text(&mut text, self.text_of(*name));
-                            members.push((name, remap(*child)));
+                            let name = copy_text(&mut text, self.text_of(name));
+                            members
+                                .push_reserved(name, remap(child))
+                                .ok_or(ExtractError::Allocation {
+                                    requested: usize::MAX,
+                                })?;
                         }
                         Slot::object(Range {
                             start,
@@ -299,19 +328,31 @@ impl Document {
                     SlotKind::Null => Slot::null(),
                     SlotKind::Bool(value) => Slot::boolean(value),
                 };
-                ranges.push(slot.range);
+                ranges.push_reserved(slot.range).ok_or(ExtractError::Allocation {
+                    requested: usize::MAX,
+                })?;
                 tags.push(slot.tag);
             }
             ids.push(NodeId(remap(span.root)));
         }
         let start = items.len();
-        items.extend(ids.iter().map(|id| id.0));
+        for id in &ids {
+            items
+                .push_reserved(id.0)
+                .ok_or(ExtractError::Allocation {
+                    requested: usize::MAX,
+                })?;
+        }
         let root = ranges.len();
         let root_slot = Slot::array(Range {
             start,
             end: items.len(),
         });
-        ranges.push(root_slot.range);
+        ranges
+            .push_reserved(root_slot.range)
+            .ok_or(ExtractError::Allocation {
+                requested: usize::MAX,
+            })?;
         tags.push(root_slot.tag);
         Ok((
             Document {
