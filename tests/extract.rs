@@ -272,7 +272,7 @@ fn no_roots_give_an_empty_array() {
         .expect("extracts");
     assert!(ids.is_empty());
     assert_eq!(to_vec(&extract, LIMITS).expect("encodes"), b"[]");
-    assert_eq!(recorder.requests, [SLOT]);
+    assert_eq!(recorder.requests, [16, 1]);
     assert_eq!(extract.retained_bytes(), SLOT);
 }
 
